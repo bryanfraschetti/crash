@@ -2,7 +2,7 @@ Source: crash
 Section: utils
 Priority: optional
 Maintainer: Josh Huber <huber@debian.org>
-Build-Depends: debhelper (>= 3.0), binutils-dev, zlib1g-dev, libncurses5-dev
+Build-Depends: dbs, debhelper (>= 4), binutils-dev, zlib1g-dev, libncurses5-dev
 Standards-Version: 3.6.1
 
 Package: crash
