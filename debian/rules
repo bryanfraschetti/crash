@@ -1,0 +1,80 @@
+#!/usr/bin/make -f
+# Sample debian/rules that uses debhelper.
+# GNU copyright 1997 to 1999 by Joey Hess.
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+export DH_COMPAT=3
+TAR_DIR = crash-3.8-2.1
+
+# the dbs rules
+include /usr/share/dbs/dbs-build.mk
+
+# convenient way to set architecture specification strings
+# the ifeq condition is here to allow them to be overridden
+# from the command line
+ifeq (,$(DEB_BUILD_GNU_TYPE))
+    include /usr/share/dbs/dpkg-arch.mk
+endif
+
+configure: configure-stamp
+configure-stamp: $(patched)
+	dh_testdir
+	# Add here commands to configure the package.
+
+	touch configure-stamp
+
+build: configure-stamp build-stamp
+build-stamp: $(patched)
+	dh_testdir
+
+	# Add here commands to compile the package.
+	cd $(BUILD_TREE) && $(MAKE)
+
+	touch build-stamp
+
+clean:
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp configure-stamp
+	rm -rf $(STAMP_DIR) $(SOURCE_DIR)
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_clean -k
+	dh_installdirs
+
+	# Add here commands to install the package into debian/tmp.
+	cp -f $(BUILD_TREE)/crash `pwd`/debian/crash/usr/sbin
+	cp -f debian/crash.8 `pwd`/debian/crash/usr/share/man/man8
+
+# Build architecture-independent files here.
+binary-indep: build install
+# We have nothing to do by default.
+
+# Build architecture-dependent files here.
+binary-arch: build install
+	dh_testdir
+	dh_testroot
+	dh_installdocs 
+	# rename & compress the upstream changelog file.
+	mv debian/crash/usr/share/doc/crash/crash.changelog \
+	   debian/crash/usr/share/doc/crash/changelog
+	gzip -f9 debian/crash/usr/share/doc/crash/changelog
+	dh_installchangelogs 
+	dh_link
+	dh_strip
+	dh_compress
+	dh_fixperms
+	# You may want to make some executables suid here.
+	dh_installdeb
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install configure

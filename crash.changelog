@@ -1,0 +1,33 @@
+Recent changelog:
+
+04/22/04: Version 3.7-5.4 is the first crash release that supports 
+          the 2.6 kernel. 
+
+05/04/04: Version 3.8-0 is the first crash release containing FSF gdb-6.1,
+          replacing Red Hat version gdb-5.3post-0.20021129.36rh
+
+06/02/04: Version 3.8-1 introduces x86_64 support.  Also, updates from 
+          Corey Minyard to support the 2.6 LKCD dumpfile format were applied.
+
+06/17/04: Version 3.8-2 introduces support for the diskdump facility on ia64
+          platforms (diskdump support for x86 has always worked).  There is
+          preliminary support for diskdump support from x86_64 platforms as 
+          well, but is untested on SMP because diskdump has not been developed
+          for SMP systems because of unresolved CONFIG_NUMA issues.  Several
+          bug fixes, primarily related to ia64 commands, were forwarded by
+          Takao Indoh of Fujitsu and applied.  The "mod -S" command now takes
+          an optional directory argument, which overrides the default module
+          tree search location /lib/modules/<release>.
+
+06/22/04: Version 3.8-2.1 fixes a flurry of bugs related to 2.6 kernel changes:
+          - The initialization of kmem_cache subsytem was causing a crash
+            invocation failure on UP systems; fixed bug, but also added a 
+            "--no_kmem_cache" command line option to skip over kmem_cache
+            slab subsystem initialization, since there's no need to die if
+            the slab subsystem undergoes changes.
+          - Fix to handle new kmem_bufctl_t typedef, which has always been
+            an int, but is now a processor-dependent int or short.  This
+            resulted in "kmem -S" causing a segmentation violation.
+          - Fix to deal with structure member name change from page->count
+            to page->_count.  This was causing various kmem command options
+            to fail.
