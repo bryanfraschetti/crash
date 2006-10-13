@@ -1,8 +1,8 @@
 /* gdb_interface.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -557,6 +557,14 @@ restore_gdb_sanity(void)
 	repeat_count_threshold = 0x7fffffff;
 
 	error_hook = NULL;
+
+	if (st->flags & ADD_SYMBOL_FILE) {
+		error(INFO, 
+		    "%s\n     gdb add-symbol-file command failed\n", 
+			st->current->mod_namelist);
+		delete_load_module(st->current->mod_base);
+                st->flags &= ~ADD_SYMBOL_FILE;
+	}
 
 	if (pc->cur_gdb_cmd) {
 		pc->last_gdb_cmd = pc->cur_gdb_cmd;

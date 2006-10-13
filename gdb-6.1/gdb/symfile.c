@@ -3,7 +3,7 @@
    Copyright 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
    1999, 2000, 2001, 2002, 2003, 2004 Free Software Foundation, Inc.
    Portions Copyright (C) 2001, 2002 Mission Critical Linux, Inc.
-   Copyright (c) 2002, 2003, 2004, 2005 Red Hat, Inc. All rights reserved.
+   Copyright (c) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
 
    Contributed by Cygnus Support, using pieces from other GDB modules.
 
@@ -3510,6 +3510,13 @@ symfile_dummy_outputs (bfd *abfd, asection *sectp, void *dummy)
 bfd_byte *
 symfile_relocate_debug_section (bfd *abfd, asection *sectp, bfd_byte *buf)
 {
+#ifdef CRASH_MERGE
+  /* Executable files have all the relocations already resolved.
+   * Handle files linked with --emit-relocs.
+   * http://sources.redhat.com/ml/gdb/2006-08/msg00137.html  */
+  if ((abfd->flags & EXEC_P) != 0)
+    return NULL;
+#endif
   /* We're only interested in debugging sections with relocation
      information.  */
   if ((sectp->flags & SEC_RELOC) == 0)

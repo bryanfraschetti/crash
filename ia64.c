@@ -25,6 +25,8 @@ static void ia64_old_unwind_init(void);
 static void try_old_unwind(struct bt_info *);
 static void ia64_dump_irq(int);
 static ulong ia64_processor_speed(void);
+static int ia64_vtop_4l(ulong, physaddr_t *paddr, ulong *pgd, int, int);
+static int ia64_vtop(ulong, physaddr_t *paddr, ulong *pgd, int, int);
 static int ia64_uvtop(struct task_context *, ulong, physaddr_t *, int);
 static int ia64_kvtop(struct task_context *, ulong, physaddr_t *, int);
 static ulong ia64_get_task_pgd(ulong);
@@ -51,6 +53,7 @@ static struct line_number_hook ia64_line_number_hooks[];
 static ulong ia64_get_stackbase(ulong);
 static ulong ia64_get_stacktop(ulong);
 static void parse_cmdline_arg(void);
+static void ia64_calc_phys_start(void);
 
 struct unw_frame_info;
 static void dump_unw_frame_info(struct unw_frame_info *);
@@ -61,6 +64,18 @@ static ulong *ia64_rse_skip_regs(ulong *, long);
 static ulong *ia64_rse_rnat_addr(ulong *);
 static ulong rse_read_reg(struct unw_frame_info *, int, int *);
 static void rse_function_params(struct unw_frame_info *, char *);
+
+static int ia64_vtop_4l_xen_wpt(ulong, physaddr_t *paddr, ulong *pgd, int, int);
+static int ia64_vtop_xen_wpt(ulong, physaddr_t *paddr, ulong *pgd, int, int);
+static int ia64_xen_kdump_p2m_create(struct xen_kdump_data *);
+static char *ia64_xen_kdump_load_page(ulong, char *);
+static ulong ia64_xen_kdump_page_mfn(ulong);
+static int ia64_xendump_p2m_create(struct xendump_data *);
+static void ia64_debug_dump_page(FILE *, char *, char *);
+static char *ia64_xendump_load_page(ulong, struct xendump_data *);
+static int ia64_xendump_page_index(ulong, struct xendump_data *);
+static ulong ia64_xendump_panic_task(struct xendump_data *);
+static void ia64_get_xendump_regs(struct xendump_data *, struct bt_info *, ulong *, ulong *);
 
 
 struct machine_specific ia64_machine_specific = { 0 };
@@ -101,11 +116,14 @@ ia64_init(int when)
 		}
                 if ((machdep->pgd = (char *)malloc(PAGESIZE())) == NULL)
                         error(FATAL, "cannot malloc pgd space.");
+		if ((machdep->pud = (char *)malloc(PAGESIZE())) == NULL)
+			error(FATAL, "cannot malloc pud space.");
                 if ((machdep->pmd = (char *)malloc(PAGESIZE())) == NULL)
                         error(FATAL, "cannot malloc pmd space.");
                 if ((machdep->ptbl = (char *)malloc(PAGESIZE())) == NULL)
                         error(FATAL, "cannot malloc ptbl space.");
                 machdep->last_pgd_read = 0;
+                machdep->last_pud_read = 0;
                 machdep->last_pmd_read = 0;
                 machdep->last_ptbl_read = 0;
 		machdep->verify_paddr = ia64_verify_paddr;
@@ -118,14 +136,17 @@ ia64_init(int when)
                 break;     
 
         case PRE_GDB:
+
 		if (pc->flags & KERNEL_DEBUG_QUERY)
 			return;
+		
 		/*
 		 * Until the kernel core dump and va_server library code
 		 * do the right thing with respect to the configured page size,
 		 * try to recognize a fatal inequity between the compiled-in 
 		 * page size and the page size used by the kernel.
 		 */ 
+		
 
 		if ((sp = symbol_search("empty_zero_page")) &&
 		    (spn = next_symbol(NULL, sp)) && 
@@ -172,10 +193,14 @@ ia64_init(int when)
 				machdep->machspec->kernel_start +
 				GIGABYTES((ulong)(4));
 			if (machdep->machspec->phys_start == UNKNOWN_PHYS_START)
-				machdep->machspec->phys_start = 
-					DEFAULT_PHYS_START;
+				ia64_calc_phys_start();
 		} else
                		machdep->machspec->vmalloc_start = KERNEL_VMALLOC_BASE;
+
+		machdep->xen_kdump_p2m_create = ia64_xen_kdump_p2m_create;
+		machdep->xendump_p2m_create = ia64_xendump_p2m_create;
+		machdep->xendump_panic_task = ia64_xendump_panic_task;
+		machdep->get_xendump_regs = ia64_get_xendump_regs;
                 break;
 
         case POST_GDB:
@@ -205,7 +230,10 @@ ia64_init(int when)
 		else if (symbol_exists("_irq_desc"))
 			ARRAY_LENGTH_INIT(machdep->nr_irqs, irq_desc, 
 				"_irq_desc", NULL, 0);
-		machdep->hz = 1024;
+		if (!machdep->hz)
+			machdep->hz = 1024;
+		machdep->section_size_bits = _SECTION_SIZE_BITS;
+		machdep->max_physmem_bits = _MAX_PHYSMEM_BITS;
 		ia64_create_memmap();
                 break;
 
@@ -231,8 +259,10 @@ parse_cmdline_arg(void)
 	char *arglist[MAXARGS];
 	ulong value;
         struct machine_specific *ms;
+	int vm_flag;
 
         ms = &ia64_machine_specific;
+	vm_flag = 0;
 
 	if (!strstr(machdep->cmdline_arg, "=")) {
 		errflag = 0;
@@ -287,10 +317,36 @@ parse_cmdline_arg(void)
 					continue;
 				}
 			}
+		} else if (STRNEQ(arglist[i], "vm=")) {
+			vm_flag++;
+			p = arglist[i] + strlen("vm=");
+			if (strlen(p)) {
+				if (STREQ(p, "4l")) {
+					machdep->flags |= VM_4_LEVEL;
+					continue;
+				}
+			}
 		}
 
 		error(WARNING, "ignoring --machdep option: %s\n", arglist[i]);
 	} 
+
+	if (vm_flag) {
+		switch (machdep->flags & (VM_4_LEVEL))
+		{
+			case VM_4_LEVEL:
+				error(NOTE, "using 4-level pagetable\n");
+				c++;
+				break;
+				
+			default:
+				error(WARNING, "invalid vm= option\n");
+				c++;
+				machdep->flags &= ~(VM_4_LEVEL);
+				break;
+		} 
+	}
+
 
 	if (c)
 		fprintf(fp, "\n");
@@ -408,6 +464,8 @@ ia64_dump_machdep_table(ulong arg)
 		fprintf(fp, "%sDEVMEMRD", others++ ? "|" : "");
 	if (machdep->flags & INIT)
 		fprintf(fp, "%sINIT", others++ ? "|" : "");
+	if (machdep->flags & VM_4_LEVEL)
+		fprintf(fp, "%sVM_4_LEVEL", others++ ? "|" : "");
         fprintf(fp, ")\n");
         fprintf(fp, "             kvbase: %lx\n", machdep->kvbase);
 	fprintf(fp, "  identity_map_base: %lx\n", machdep->identity_map_base);
@@ -446,18 +504,25 @@ ia64_dump_machdep_table(ulong arg)
 		(machdep->verify_paddr == ia64_verify_paddr) ?
 		"ia64_verify_paddr" : "generic_verify_paddr");
         fprintf(fp, "    init_kernel_pgd: NULL\n");
-	fprintf(fp, " xendump_p2m_create: NULL\n");
-	fprintf(fp, "xen_kdump_p2m_create: NULL\n");
+	fprintf(fp, "xen_kdump_p2m_create: ia64_xen_kdump_p2m_create()\n");
+        fprintf(fp, " xendump_p2m_create: ia64_xendump_p2m_create()\n");
+	fprintf(fp, " xendump_panic_task: ia64_xendump_panic_task()\n");
+	fprintf(fp, "   get_xendump_regs: ia64_get_xendump_regs()\n");
 	fprintf(fp, "    value_to_symbol: generic_machdep_value_to_symbol()\n");
         fprintf(fp, "  line_number_hooks: ia64_line_number_hooks\n");
         fprintf(fp, "      last_pgd_read: %lx\n", machdep->last_pgd_read);
+        fprintf(fp, "      last_pud_read: %lx\n", machdep->last_pud_read);
         fprintf(fp, "      last_pmd_read: %lx\n", machdep->last_pmd_read);
         fprintf(fp, "     last_ptbl_read: %lx\n", machdep->last_ptbl_read);
         fprintf(fp, "                pgd: %lx\n", (ulong)machdep->pgd);
+        fprintf(fp, "                pud: %lx\n", (ulong)machdep->pud);
         fprintf(fp, "                pmd: %lx\n", (ulong)machdep->pmd);
         fprintf(fp, "               ptbl: %lx\n", (ulong)machdep->ptbl);
 	fprintf(fp, "       ptrs_per_pgd: %d\n", machdep->ptrs_per_pgd);
 	fprintf(fp, "        cmdline_arg: %s\n", machdep->cmdline_arg);
+        fprintf(fp, "  section_size_bits: %ld\n", machdep->section_size_bits);
+        fprintf(fp, "   max_physmem_bits: %ld\n", machdep->max_physmem_bits);
+        fprintf(fp, "  sections_per_root: %ld\n", machdep->sections_per_root);
         fprintf(fp, "           machspec: ia64_machine_specific\n");
 	fprintf(fp, "                   cpu_data_address: %lx\n", 
 			machdep->machspec->cpu_data_address);
@@ -568,9 +633,9 @@ ia64_verify_symbol(const char *name, ulong value, char type)
         if (CRASHDEBUG(8))
                 fprintf(fp, "%016lx %s\n", value, name);
 
-	if (STREQ(name, "phys_start") && type == 'A')
-		if (machdep->machspec->phys_start == UNKNOWN_PHYS_START)
-			machdep->machspec->phys_start = value;
+//	if (STREQ(name, "phys_start") && type == 'A')
+//		if (machdep->machspec->phys_start == UNKNOWN_PHYS_START)
+//			machdep->machspec->phys_start = value;
 
 	region = VADDR_REGION(value);
 
@@ -668,6 +733,176 @@ ia64_processor_speed(void)
 	return (machdep->mhz = mhz);
 }
 
+/* Generic abstraction to translate user or kernel virtual
+ * addresses to physical using a 4 level page table.
+ */
+static int
+ia64_vtop_4l(ulong vaddr, physaddr_t *paddr, ulong *pgd, int verbose, int usr)
+{
+	ulong *page_dir;
+	ulong *page_upper;
+	ulong *page_middle;
+	ulong *page_table;
+	ulong pgd_pte;
+	ulong pud_pte;
+	ulong pmd_pte;
+	ulong pte;
+	ulong region, offset;
+
+	if (usr) {
+		region = VADDR_REGION(vaddr);
+		offset = (vaddr >> PGDIR_SHIFT) & ((PTRS_PER_PGD >> 3) - 1);
+		offset |= (region << (PAGESHIFT() - 6));
+		page_dir = pgd + offset;
+	} else {
+		if (!(pgd = (ulong *)vt->kernel_pgd[0]))
+			error(FATAL, "cannot determine kernel pgd pointer\n");
+		page_dir = pgd + ((vaddr >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1));
+	}
+
+	if (verbose) 
+		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
+
+	FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
+	pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
+	
+        if (verbose) 
+                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
+
+        if (!(pgd_pte))
+		return FALSE;
+	
+	offset = (vaddr >> PUD_SHIFT) & (PTRS_PER_PUD - 1);
+	page_upper = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
+	
+	FILL_PUD(PAGEBASE(page_upper), KVADDR, PAGESIZE());
+	pud_pte = ULONG(machdep->pud + PAGEOFFSET(page_upper));
+        
+	if (verbose) 
+                fprintf(fp, "   PUD: %lx => %lx\n", (ulong)page_upper, pud_pte);
+        
+	if (!(pud_pte))
+		return FALSE;
+
+	offset = (vaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
+	page_middle = (ulong *)(PTOV(pud_pte & _PFN_MASK)) + offset; 
+
+	FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
+	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
+
+        if (verbose)
+                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle, pmd_pte);
+
+        if (!(pmd_pte))
+		return FALSE;
+
+        offset = (vaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
+        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
+
+	FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
+	pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
+
+        if (verbose)
+                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
+
+        if (!(pte & (_PAGE_P))) {
+		if (usr)
+		  	*paddr = pte;
+		if (pte && verbose) {
+			fprintf(fp, "\n");
+			ia64_translate_pte(pte, 0, 0);
+		}
+		return FALSE;
+        }
+
+        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(vaddr);
+
+        if (verbose) {
+                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
+		ia64_translate_pte(pte, 0, 0);
+	}
+
+	return TRUE;
+}
+
+/* Generic abstraction to translate user or kernel virtual
+ * addresses to physical using a 3 level page table.
+ */
+static int
+ia64_vtop(ulong vaddr, physaddr_t *paddr, ulong *pgd, int verbose, int usr)
+{
+	ulong *page_dir;
+	ulong *page_middle;
+	ulong *page_table;
+	ulong pgd_pte;
+	ulong pmd_pte;
+	ulong pte;
+	ulong region, offset;
+
+	if (usr) {
+		region = VADDR_REGION(vaddr);
+		offset = (vaddr >> PGDIR_SHIFT_3L) & ((PTRS_PER_PGD >> 3) - 1);
+		offset |= (region << (PAGESHIFT() - 6));
+		page_dir = pgd + offset;
+	} else {
+		if (!(pgd = (ulong *)vt->kernel_pgd[0]))
+			error(FATAL, "cannot determine kernel pgd pointer\n");
+		page_dir = pgd + ((vaddr >> PGDIR_SHIFT_3L) & (PTRS_PER_PGD - 1));
+	}
+
+	if (verbose)
+		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
+	
+	FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
+	pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
+	
+        if (verbose) 
+                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
+
+        if (!(pgd_pte))
+		return FALSE;
+
+	offset = (vaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
+	page_middle = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
+
+	FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
+	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
+
+        if (verbose)
+                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle, pmd_pte);
+
+        if (!(pmd_pte))
+		return FALSE;
+
+        offset = (vaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
+        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
+
+	FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
+	pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
+
+        if (verbose)
+                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
+
+        if (!(pte & (_PAGE_P))) {
+		if (usr)
+		  	*paddr = pte;
+		if (pte && verbose) {
+			fprintf(fp, "\n");
+			ia64_translate_pte(pte, 0, 0);
+		}
+		return FALSE;
+        }
+
+        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(vaddr);
+
+        if (verbose) {
+                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
+		ia64_translate_pte(pte, 0, 0);
+	}
+
+	return TRUE;
+}
+
 
 /*
  *  Translates a user virtual address to its physical address.  cmd_vtop()
@@ -683,19 +918,11 @@ ia64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verbose
 {
 	ulong mm;
 	ulong *pgd;
-	ulong *page_dir;
-	ulong *page_middle;
-	ulong *page_table;
-	ulong pgd_pte;
-	ulong pmd_pte;
-	ulong pte;
-	ulong region, offset;
 
 	if (!tc)
 		error(FATAL, "current context invalid\n");
 
 	*paddr = 0;
-       	region = VADDR_REGION(uvaddr);
 
 	if (IS_KVADDR(uvaddr))
 		return ia64_kvtop(tc, uvaddr, paddr, verbose);
@@ -706,65 +933,18 @@ ia64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verbose
 		readmem(tc->mm_struct + OFFSET(mm_struct_pgd), KVADDR, &pgd,
 			sizeof(long), "mm_struct pgd", FAULT_ON_ERROR);
 
-	if (verbose) 
-		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
-
-        offset = (uvaddr >> PGDIR_SHIFT) & ((PTRS_PER_PGD >> 3) - 1);
-        offset |= (region << (PAGESHIFT() - 6));
-        page_dir = pgd + offset;
-
-	FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
-	pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
-	
-        if (verbose) {
-                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
-        }
-
-        if (!(pgd_pte))
-                goto no_upage;
-
-	offset = (uvaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
-	page_middle = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
-
-	FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
-	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
-
-        if (verbose)
-                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle,pmd_pte);
-
-        if (!(pmd_pte))
-                goto no_upage;
-
-        offset = (uvaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
-        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
-
-	FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
-	pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
-
-        if (verbose)
-                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
-
-        if (!(pte & (_PAGE_P))) {
-		*paddr = pte;
-		if (pte && verbose) {
-			fprintf(fp, "\n");
-			ia64_translate_pte(pte, 0, 0);
-		}
-                goto no_upage;
-        }
-
-        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(uvaddr);
-
-        if (verbose) {
-                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
-		ia64_translate_pte(pte, 0, 0);
+	if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES)) {
+                if (machdep->flags & VM_4_LEVEL)
+                        return ia64_vtop_4l_xen_wpt(uvaddr, paddr, pgd, verbose, 1);
+                else
+                        return ia64_vtop_xen_wpt(uvaddr, paddr, pgd, verbose, 1);
+	} else {
+		if (machdep->flags & VM_4_LEVEL)
+			return ia64_vtop_4l(uvaddr, paddr, pgd, verbose, 1);
+		else
+			return ia64_vtop(uvaddr, paddr, pgd, verbose, 1);
 	}
-
-	return TRUE;
-
-no_upage:
-
-	return FALSE;
+	
 }
 
 
@@ -777,13 +957,6 @@ static int
 ia64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbose)
 {
         ulong *pgd;
-        ulong *page_dir;
-        ulong *page_middle;
-        ulong *page_table;
-        ulong pgd_pte;
-        ulong pmd_pte;
-        ulong pte;
-	ulong offset;
 
         if (!IS_KVADDR(kvaddr))
                 return FALSE;
@@ -816,66 +989,21 @@ ia64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbose
                 return TRUE;
         }
 
-        pgd = (ulong *)vt->kernel_pgd[0];
+        if (!(pgd = (ulong *)vt->kernel_pgd[0]))
+		error(FATAL, "cannot determine kernel pgd pointer\n");
 
-        if (verbose) {
-                fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
+	if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES)) {
+                if (machdep->flags & VM_4_LEVEL)
+                        return ia64_vtop_4l_xen_wpt(kvaddr, paddr, pgd, verbose, 0);
+                else
+                        return ia64_vtop_xen_wpt(kvaddr, paddr, pgd, verbose, 0);
+	} else {
+		if (machdep->flags & VM_4_LEVEL)
+			return ia64_vtop_4l(kvaddr, paddr, pgd, verbose, 0);
+		else
+			return ia64_vtop(kvaddr, paddr, pgd, verbose, 0);
 	}
 
-	page_dir = pgd + ((kvaddr >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1)); 
-
-        FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
-        pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
-
-        if (verbose) {
-                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
-	}
-
-        if (!(pgd_pte))
-                goto no_kpage;
-
-	offset = (kvaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
-	page_middle = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
-
-        FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
-        pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
-
-        if (verbose)
-                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle, 
-			pmd_pte);
-
-        if (!(pmd_pte))
-                goto no_kpage;
-
-        offset = (kvaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
-        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
-
-        FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
-        pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
-
-        if (verbose)
-                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
-
-        if (!(pte & (_PAGE_P))) {
-		if (pte && verbose) {
-			fprintf(fp, "\n");
-			ia64_translate_pte(pte, 0, 0);
-		}
-                goto no_kpage;
-        }
-
-        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(kvaddr);
-
-        if (verbose) {
-                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
-		ia64_translate_pte(pte, 0, 0);
-	}
-
-	return TRUE;
-
-no_kpage:
-
-	return FALSE;
 }
 
 /*
@@ -2394,9 +2522,10 @@ ia64_create_memmap(void)
 
 	if ((ms->mem_limit && (efi_memmap >= ms->mem_limit)) ||
             !readmem(PTOV(efi_memmap), KVADDR, memmap,
-	    ms->efi_memmap_size, "efi_mmap contents", RETURN_ON_ERROR)) {
+	    ms->efi_memmap_size, "efi_mmap contents", 
+	    QUIET|RETURN_ON_ERROR)) {
 		error(WARNING, "cannot read efi_mmap: " 
-			"memory verification will not be performed\n");
+			"EFI memory verification will not be performed\n\n");
 		free(memmap);
 		return;
 	}
@@ -3331,4 +3460,408 @@ ia64_IS_VMALLOC_ADDR(ulong vaddr)
         	(vaddr < (ulong)KERNEL_UNCACHED_BASE));
 }
 
+/* Generic abstraction to translate user or kernel virtual
+ * addresses to physical using a 4 level page table.
+ */
+static int
+ia64_vtop_4l_xen_wpt(ulong vaddr, physaddr_t *paddr, ulong *pgd, int verbose, int usr)
+{
+	error(FATAL, "ia64_vtop_4l_xen_wpt: TBD\n");
+	return FALSE;
+#ifdef TBD
+	ulong *page_dir;
+	ulong *page_upper;
+	ulong *page_middle;
+	ulong *page_table;
+	ulong pgd_pte;
+	ulong pud_pte;
+	ulong pmd_pte;
+	ulong pte;
+	ulong region, offset;
+
+
+	if (usr) {
+		region = VADDR_REGION(vaddr);
+		offset = (vaddr >> PGDIR_SHIFT) & ((PTRS_PER_PGD >> 3) - 1);
+		offset |= (region << (PAGESHIFT() - 6));
+		page_dir = pgd + offset;
+	} else {
+		if (!(pgd = (ulong *)vt->kernel_pgd[0]))
+			error(FATAL, "cannot determine kernel pgd pointer\n");
+		page_dir = pgd + ((vaddr >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1));
+	}
+
+	if (verbose) 
+		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
+
+	FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
+	pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
+	
+        if (verbose) 
+                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
+
+        if (!(pgd_pte))
+		return FALSE;
+	
+	offset = (vaddr >> PUD_SHIFT) & (PTRS_PER_PUD - 1);
+	page_upper = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
+	
+	FILL_PUD(PAGEBASE(page_upper), KVADDR, PAGESIZE());
+	pud_pte = ULONG(machdep->pud + PAGEOFFSET(page_upper));
+        
+	if (verbose) 
+                fprintf(fp, "   PUD: %lx => %lx\n", (ulong)page_upper, pud_pte);
+        
+	if (!(pud_pte))
+		return FALSE;
+
+	offset = (vaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
+	page_middle = (ulong *)(PTOV(pud_pte & _PFN_MASK)) + offset; 
+
+	FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
+	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
+
+        if (verbose)
+                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle, pmd_pte);
+
+        if (!(pmd_pte))
+		return FALSE;
+
+        offset = (vaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
+        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
+
+	FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
+	pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
+
+        if (verbose)
+                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
+
+        if (!(pte & (_PAGE_P))) {
+		if (usr)
+		  	*paddr = pte;
+		if (pte && verbose) {
+			fprintf(fp, "\n");
+			ia64_translate_pte(pte, 0, 0);
+		}
+		return FALSE;
+        }
+
+        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(vaddr);
+
+        if (verbose) {
+                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
+		ia64_translate_pte(pte, 0, 0);
+	}
+
+	return TRUE;
+#endif
+}
+
+/* Generic abstraction to translate user or kernel virtual
+ * addresses to physical using a 3 level page table.
+ */
+static int
+ia64_vtop_xen_wpt(ulong vaddr, physaddr_t *paddr, ulong *pgd, int verbose, int usr)
+{
+	error(FATAL, "ia64_vtop_xen_wpt: TBD\n");
+	return FALSE;
+#ifdef TBD
+	ulong *page_dir;
+	ulong *page_middle;
+	ulong *page_table;
+	ulong pgd_pte;
+	ulong pmd_pte;
+	ulong pte;
+	ulong region, offset;
+
+
+	if (usr) {
+		region = VADDR_REGION(vaddr);
+		offset = (vaddr >> PGDIR_SHIFT) & ((PTRS_PER_PGD >> 3) - 1);
+		offset |= (region << (PAGESHIFT() - 6));
+		page_dir = pgd + offset;
+	} else {
+		if (!(pgd = (ulong *)vt->kernel_pgd[0]))
+			error(FATAL, "cannot determine kernel pgd pointer\n");
+		page_dir = pgd + ((vaddr >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1));
+	}
+
+	if (verbose)
+		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
+
+	FILL_PGD(PAGEBASE(pgd), KVADDR, PAGESIZE());
+	pgd_pte = ULONG(machdep->pgd + PAGEOFFSET(page_dir));
+	
+        if (verbose) 
+                fprintf(fp, "   PGD: %lx => %lx\n", (ulong)page_dir, pgd_pte);
+
+        if (!(pgd_pte))
+		return FALSE;
+
+	offset = (vaddr >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
+	page_middle = (ulong *)(PTOV(pgd_pte & _PFN_MASK)) + offset; 
+
+	FILL_PMD(PAGEBASE(page_middle), KVADDR, PAGESIZE());
+	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(page_middle));
+
+        if (verbose)
+                fprintf(fp, "   PMD: %lx => %lx\n", (ulong)page_middle, pmd_pte);
+
+        if (!(pmd_pte))
+		return FALSE;
+
+        offset = (vaddr >> PAGESHIFT()) & (PTRS_PER_PTE - 1);
+        page_table = (ulong *)(PTOV(pmd_pte & _PFN_MASK)) + offset;
+
+	FILL_PTBL(PAGEBASE(page_table), KVADDR, PAGESIZE());
+	pte = ULONG(machdep->ptbl + PAGEOFFSET(page_table));
+
+        if (verbose)
+                fprintf(fp, "   PTE: %lx => %lx\n", (ulong)page_table, pte);
+
+        if (!(pte & (_PAGE_P))) {
+		if (usr)
+		  	*paddr = pte;
+		if (pte && verbose) {
+			fprintf(fp, "\n");
+			ia64_translate_pte(pte, 0, 0);
+		}
+		return FALSE;
+        }
+
+        *paddr = (pte & _PFN_MASK) + PAGEOFFSET(vaddr);
+
+        if (verbose) {
+                fprintf(fp, "  PAGE: %lx\n\n", PAGEBASE(*paddr));
+		ia64_translate_pte(pte, 0, 0);
+	}
+
+	return TRUE;
+#endif
+}
+
+#include "netdump.h"
+
+/*
+ *  Determine the relocatable physical address base.
+ */
+static void
+ia64_calc_phys_start(void)
+{
+	FILE *iomem;
+	int i, found, errflag;
+	char buf[BUFSIZE];
+	char *p1;
+	ulong kernel_code_start;
+	struct vmcore_data *vd;
+	Elf64_Phdr *phdr;
+	ulong phys_start, text_start;
+
+	/*
+	 *  Default to 64MB.
+	 */
+	machdep->machspec->phys_start = DEFAULT_PHYS_START;
+
+	text_start = symbol_exists("_text") ? symbol_value("_text") : BADADDR;
+
+	if (ACTIVE()) {
+	        if ((iomem = fopen("/proc/iomem", "r")) == NULL)
+	                return;
+	
+		errflag = 1;
+	        while (fgets(buf, BUFSIZE, iomem)) {
+			if (strstr(buf, ": Kernel code")) {
+				clean_line(buf);
+				errflag = 0;
+				break;
+			}
+		}
+	        fclose(iomem);
+	
+		if (errflag)
+			return;
+	
+		if (!(p1 = strstr(buf, "-")))
+			return;
+		else
+			*p1 = NULLCHAR;
+	
+		errflag = 0;
+		kernel_code_start = htol(buf, RETURN_ON_ERROR|QUIET, &errflag);
+	        if (errflag)
+			return;
+	
+		machdep->machspec->phys_start = kernel_code_start;
+	
+		if (CRASHDEBUG(1)) {
+			if (text_start == BADADDR)
+				fprintf(fp, "_text: (unknown)  ");
+			else
+				fprintf(fp, "_text: %lx  ", text_start);
+			fprintf(fp, "Kernel code: %lx -> ", kernel_code_start);
+			fprintf(fp, "phys_start: %lx\n\n", 
+				machdep->machspec->phys_start);
+		}
+
+		return;
+	}
+
+	/*
+	 *  Get relocation value from whatever dumpfile format is being used.
+	 */
+
+        if (DISKDUMP_DUMPFILE()) {
+                if (diskdump_phys_base(&phys_start)) {
+                        machdep->machspec->phys_start = phys_start;
+			if (CRASHDEBUG(1))
+				fprintf(fp, 
+				    "compressed kdump: phys_start: %lx\n",
+					phys_start);
+		}
+                return;
+        }
+
+	if ((vd = get_kdump_vmcore_data())) {
+		/*
+		 *  There should be at most one region 5 region, and it
+		 *  should be equal to "_text".  If not, take whatever
+		 *  region 5 address comes first and hope for the best.
+		 */
+                for (i = found = 0; i < vd->num_pt_load_segments; i++) {
+			phdr = vd->load64 + i;
+			if (phdr->p_vaddr == text_start) {
+				machdep->machspec->phys_start = phdr->p_paddr;
+				found++;
+				break;
+			}
+		}
+
+                for (i = 0; !found && (i < vd->num_pt_load_segments); i++) {
+			phdr = vd->load64 + i;
+			if (VADDR_REGION(phdr->p_vaddr) == KERNEL_VMALLOC_REGION) {
+				machdep->machspec->phys_start = phdr->p_paddr;
+				found++;
+				break;
+			}
+		}
+
+		if (found && CRASHDEBUG(1)) {
+			if (text_start == BADADDR)
+				fprintf(fp, "_text: (unknown)  ");
+			else
+				fprintf(fp, "_text: %lx  ", text_start);
+			fprintf(fp, "p_vaddr: %lx  p_paddr: %lx\n", 
+				phdr->p_vaddr, phdr->p_paddr);
+		}
+
+		return;
+	}
+}
+
+/*
+ *  From the xen vmcore, create an index of mfns for each page that makes
+ *  up the dom0 kernel's complete phys_to_machine_mapping[max_pfn] array.
+ */
+
+static int
+ia64_xen_kdump_p2m_create(struct xen_kdump_data *xkd)
+{
+	error(FATAL, "ia64_xen_kdump_p2m_create: TBD\n");
+
+	/* dummy calls for clean "make [wW]arn" */
+	ia64_xen_kdump_load_page(0, NULL);
+	ia64_xen_kdump_page_mfn(0);
+	ia64_debug_dump_page(NULL, NULL, NULL);
+
+	return FALSE;
+}
+
+static char *
+ia64_xen_kdump_load_page(ulong kvaddr, char *pgbuf)
+{
+	error(FATAL, "ia64_xen_kdump_load_page: TBD\n");
+	return NULL;
+}
+
+static ulong
+ia64_xen_kdump_page_mfn(ulong kvaddr)
+{
+	error(FATAL, "ia64_xen_kdump_page_mfn: TBD\n");
+	return 0;
+}
+
+#include "xendump.h"
+
+/*
+ *  Create an index of mfns for each page that makes up the
+ *  kernel's complete phys_to_machine_mapping[max_pfn] array.
+ */
+static int
+ia64_xendump_p2m_create(struct xendump_data *xd)
+{
+	error(FATAL, "ia64_xendump_p2m_create: TBD\n");
+
+	/* dummy calls for clean "make [wW]arn" */
+	ia64_debug_dump_page(NULL, NULL, NULL);
+	ia64_xendump_load_page(0, xd);
+	ia64_xendump_page_index(0, xd);
+	ia64_xendump_panic_task(xd);  /* externally called */
+	ia64_get_xendump_regs(xd, NULL, NULL, NULL);  /* externally called */
+
+	return FALSE;
+}
+
+static void
+ia64_debug_dump_page(FILE *ofp, char *page, char *name)
+{
+        int i;
+        ulong *up;
+
+        fprintf(ofp, "%s\n", name);
+
+        up = (ulong *)page;
+        for (i = 0; i < 1024; i++) {
+                fprintf(ofp, "%016lx: %016lx %016lx\n",
+                        (ulong)((i * 2) * sizeof(ulong)),
+                        *up, *(up+1));
+                up += 2;
+        }
+}
+
+/*
+ *  Find the page associate with the kvaddr, and read its contents
+ *  into the passed-in buffer.
+ */
+static char *
+ia64_xendump_load_page(ulong kvaddr, struct xendump_data *xd)
+{
+	error(FATAL, "ia64_xendump_load_page: TBD\n");
+
+	return NULL;
+}
+
+/*
+ *  Find the dumpfile page index associated with the kvaddr.
+ */
+static int
+ia64_xendump_page_index(ulong kvaddr, struct xendump_data *xd)
+{
+	error(FATAL, "ia64_xendump_page_index: TBD\n");
+
+	return 0;
+}
+
+static ulong
+ia64_xendump_panic_task(struct xendump_data *xd)
+{
+	error(INFO, "ia64_xendump_panic_task: TBD\n");
+
+	return NO_TASK;
+}
+
+static void
+ia64_get_xendump_regs(struct xendump_data *xd, struct bt_info *bt, ulong *rip, ulong *rsp)
+{
+	error(FATAL, "ia64_get_xendump_regs: TBD\n");
+}
 #endif

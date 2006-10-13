@@ -1,8 +1,8 @@
 /* kernel.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,359 +42,365 @@ static int verify_modules(void);
 static void verify_namelist(void);
 static char *debug_kernel_version(char *);
 static int restore_stack(struct bt_info *);
-static ulong __xen_machine_to_pseudo(ulonglong, ulong);
+static ulong __xen_m2p(ulonglong, ulong);
+static void read_in_kernel_config_err(int, char *);
 
 
 /*
  *  Gather a few kernel basics.
  */
 void
-kernel_init(int when)
+kernel_init()
 {
-	int i;
+	int i, c;
 	char *p1, *p2, buf[BUFSIZE];
 	struct syment *sp1, *sp2;
+	char *rqstruct;
 
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
 
-	switch (when)
-	{
-	case PRE_GDB:
-		kt->stext = symbol_value("_stext");
-		kt->etext = symbol_value("_etext");
-		get_text_init_space(); 
-		if (symbol_exists("__init_begin")) {
-			kt->init_begin = symbol_value("__init_begin");
-			kt->init_end = symbol_value("__init_end");
-		}
-		kt->end = symbol_value("_end");
+	kt->stext = symbol_value("_stext");
+	kt->etext = symbol_value("_etext");
+	get_text_init_space(); 
+	if (symbol_exists("__init_begin")) {
+		kt->init_begin = symbol_value("__init_begin");
+		kt->init_end = symbol_value("__init_end");
+	}
+	kt->end = symbol_value("_end");
 	
-		/*
-		 *  If Xen architecture, default to a guest kernel running
-		 *  with writable page tables; for now it can be overridden
-		 *  with the --hypervisor and --shared_page_tables command
-		 *  line options.
-		 */ 
-		if (symbol_exists("xen_start_info")) {
-			kt->flags |= ARCH_XEN;
-			if (!(kt->xen_flags & (SHADOW_PAGE_TABLES|CANONICAL_PAGE_TABLES)))
-				kt->xen_flags |= WRITABLE_PAGE_TABLES;
-             		get_symbol_data("phys_to_machine_mapping", sizeof(ulong),
-                        	&kt->phys_to_machine_mapping);
-			if (machine_type("X86"))
-                		get_symbol_data("max_pfn", sizeof(ulong), &kt->p2m_table_size);
-			if (machine_type("X86_64"))
-                		get_symbol_data("end_pfn", sizeof(ulong), &kt->p2m_table_size);
-                	if ((kt->machine_to_pseudo = (char *)malloc(PAGESIZE())) == NULL)
-                        	error(FATAL, "cannot malloc machine_to_pseudo space.");
-		}
+	/*
+	 *  If Xen architecture, default to writable page tables; for now
+	 *  it can be overridden with the --shared_page_tables command
+	 *  line option.
+	 */ 
+	if (symbol_exists("xen_start_info")) {
+		kt->flags |= ARCH_XEN;
+		if (!(kt->xen_flags & (SHADOW_PAGE_TABLES|CANONICAL_PAGE_TABLES)))
+			kt->xen_flags |= WRITABLE_PAGE_TABLES;
+         	get_symbol_data("phys_to_machine_mapping", sizeof(ulong),
+                       	&kt->phys_to_machine_mapping);
+		if (machine_type("X86"))
+                	get_symbol_data("max_pfn", sizeof(ulong), &kt->p2m_table_size);
+		if (machine_type("X86_64"))
+                	get_symbol_data("end_pfn", sizeof(ulong), &kt->p2m_table_size);
+                if ((kt->m2p_page = (char *)malloc(PAGESIZE())) == NULL)
+                       	error(FATAL, "cannot malloc m2p page.");
+	}
 
-		if (symbol_exists("smp_num_cpus")) {
-			kt->flags |= SMP;
-			get_symbol_data("smp_num_cpus", sizeof(int), &kt->cpus);
-			if (kt->cpus < 1 || kt->cpus > NR_CPUS)
-				error(WARNING, 
-				    "invalid value: smp_num_cpus: %d\n",
-					kt->cpus);
-		} else if (symbol_exists("__per_cpu_offset")) {
-			kt->flags |= SMP;
-			kt->cpus = 1;
-		} else 
-			kt->cpus = 1;
-
-		if ((sp1 = symbol_search("__per_cpu_start")) &&
-	 	    (sp2 =  symbol_search("__per_cpu_end")) &&
-		    (sp1->type == 'A') && (sp2->type == 'A') &&
-		    (sp2->value > sp1->value))
-			kt->flags |= SMP|PER_CPU_OFF;
-	
-		get_symbol_data("xtime", sizeof(struct timespec), &kt->date);
-	
-		if (pc->flags & GET_TIMESTAMP) {
-	        	fprintf(fp, "%s\n\n", 
-				strip_linefeeds(ctime(&kt->date.tv_sec)));
-			clean_exit(0);
-		}
-	
-		if (symbol_exists("system_utsname"))
-	        	readmem(symbol_value("system_utsname"), KVADDR, &kt->utsname,
-	                	sizeof(struct new_utsname), "system_utsname", 
-				RETURN_ON_ERROR);
-		else if (symbol_exists("init_uts_ns"))
-			readmem(symbol_value("init_uts_ns") + sizeof(int),
-				KVADDR,  &kt->utsname, sizeof(struct new_utsname), 
-				"init_uts_ns", RETURN_ON_ERROR);
-		else
-			error(INFO, "cannot access utsname information\n\n");
-
-		strncpy(buf, kt->utsname.release, MIN(strlen(kt->utsname.release), 65));
-		if (ascii_string(kt->utsname.release)) {
-			p1 = p2 = buf;
-			while (*p2 != '.')
-				p2++;
-			*p2 = NULLCHAR;
-			kt->kernel_version[0] = atoi(p1);
-			p1 = ++p2;
-			while (*p2 != '.')
-				p2++;
-			*p2 = NULLCHAR;
-			kt->kernel_version[1] = atoi(p1);
-			p1 = ++p2;
-			while ((*p2 >= '0') && (*p2 <= '9'))
-				p2++;
-			*p2 = NULLCHAR;
-			kt->kernel_version[2] = atoi(p1);
-		}
-
-		break;
-
-	case POST_GDB:
-		if (symbol_exists("__per_cpu_offset")) {
-			i = get_array_length("__per_cpu_offset", NULL, 0);
-			get_symbol_data("__per_cpu_offset", 
-				sizeof(long)*(i <= NR_CPUS ? i : NR_CPUS),
-				&kt->__per_cpu_offset[0]); 
-			kt->flags |= PER_CPU_OFF;
-		}
-		MEMBER_OFFSET_INIT(runqueue_cpu, "runqueue", "cpu");
-		if (VALID_MEMBER(runqueue_cpu) &&
-		    (get_array_length("runqueue.cpu", NULL, 0) > 0)) {
-			MEMBER_OFFSET_INIT(cpu_s_curr, "cpu_s", "curr");
-			MEMBER_OFFSET_INIT(cpu_s_idle, "cpu_s", "idle");
-		 	STRUCT_SIZE_INIT(cpu_s, "cpu_s"); 
-			kt->runq_siblings = get_array_length("runqueue.cpu", 
-				NULL, 0);
-			if (symbol_exists("__cpu_idx") &&
-			    symbol_exists("__rq_idx")) {
-				if (!readmem(symbol_value("__cpu_idx"), KVADDR, 
-			            &kt->__cpu_idx[0], sizeof(long) * NR_CPUS,
-	                            "__cpu_idx[NR_CPUS]", RETURN_ON_ERROR))
-					error(INFO, 
-				      "cannot read __cpu_idx[NR_CPUS] array\n");
-				if (!readmem(symbol_value("__rq_idx"), KVADDR, 
-			            &kt->__rq_idx[0], sizeof(long) * NR_CPUS,
-	                            "__rq_idx[NR_CPUS]", RETURN_ON_ERROR))
-					error(INFO, 
-				       "cannot read __rq_idx[NR_CPUS] array\n");
-			} else if (kt->runq_siblings > 1) 
-				error(INFO, 
-	     "runq_siblings: %d: __cpu_idx and __rq_idx arrays don't exist?\n",
-					kt->runq_siblings);
-		} else {
-			MEMBER_OFFSET_INIT(runqueue_idle, "runqueue", "idle");
-			MEMBER_OFFSET_INIT(runqueue_curr, "runqueue", "curr");
-			ASSIGN_OFFSET(runqueue_cpu) = INVALID_OFFSET;
-		}
-		MEMBER_OFFSET_INIT(runqueue_active, "runqueue", "active");
-		MEMBER_OFFSET_INIT(runqueue_expired, "runqueue", "expired");
-		MEMBER_OFFSET_INIT(runqueue_arrays, "runqueue", "arrays");
-		MEMBER_OFFSET_INIT(prio_array_queue, "prio_array", "queue");
-                MEMBER_OFFSET_INIT(prio_array_nr_active, "prio_array",
-                        "nr_active");
-		STRUCT_SIZE_INIT(runqueue, "runqueue"); 
-		STRUCT_SIZE_INIT(prio_array, "prio_array"); 
-
-               /*
-                *  In 2.4, smp_send_stop() sets smp_num_cpus back to 1
-                *  in some, but not all, architectures.  So if a count
-                *  of 1 is found, be suspicious, and check the
-                *  init_tasks[NR_CPUS] array (also intro'd in 2.4),
-                *  for idle thread addresses.  For 2.2, prepare for the
-	        *  eventuality by verifying the cpu count with the machine
-		*  dependent count.
-                */
-                if ((kt->flags & SMP) && DUMPFILE() && (kt->cpus == 1)) {
-                        if (symbol_exists("init_tasks")) {
-                                ulong init_tasks[NR_CPUS];
-				int nr_cpus;
-
-				BZERO(&init_tasks[0], sizeof(ulong) * NR_CPUS);
-
-				nr_cpus = get_array_length("init_tasks", 
-					NULL, 0);
-				if ((nr_cpus < 1) || (nr_cpus > NR_CPUS))
-                                        nr_cpus = NR_CPUS;
-
-				get_idle_threads(&init_tasks[0], nr_cpus);
-
-                                for (i = kt->cpus = 0; i < nr_cpus; i++)
-                                        if (init_tasks[i])
-                                                kt->cpus++;
-                	} else 
-				kt->cpus = machdep->get_smp_cpus();
-		}
-
-		if ((kt->flags & SMP) && ACTIVE() && (kt->cpus == 1) &&
-		    (kt->flags & PER_CPU_OFF))
-			kt->cpus = machdep->get_smp_cpus();
-
-		if (kt->cpus > NR_CPUS) {
+	if (symbol_exists("smp_num_cpus")) {
+		kt->flags |= SMP;
+		get_symbol_data("smp_num_cpus", sizeof(int), &kt->cpus);
+		if (kt->cpus < 1 || kt->cpus > NR_CPUS)
 			error(WARNING, 
-       "calculated number of cpus (%d) greater than compiled-in NR_CPUS (%d)\n",
-				kt->cpus, NR_CPUS);
-			error(FATAL, "recompile crash with larger NR_CPUS\n");
+			    "invalid value: smp_num_cpus: %d\n",
+				kt->cpus);
+	} else if (symbol_exists("__per_cpu_offset")) {
+		kt->flags |= SMP;
+		kt->cpus = 1;
+	} else 
+		kt->cpus = 1;
+
+	if ((sp1 = symbol_search("__per_cpu_start")) &&
+ 	    (sp2 =  symbol_search("__per_cpu_end")) &&
+	    (sp1->type == 'A') && (sp2->type == 'A') &&
+	    (sp2->value > sp1->value))
+		kt->flags |= SMP|PER_CPU_OFF;
+	
+	get_symbol_data("xtime", sizeof(struct timespec), &kt->date);
+	
+	if (pc->flags & GET_TIMESTAMP) {
+        	fprintf(fp, "%s\n\n", 
+			strip_linefeeds(ctime(&kt->date.tv_sec)));
+		clean_exit(0);
+	}
+	
+	if (symbol_exists("system_utsname"))
+        	readmem(symbol_value("system_utsname"), KVADDR, &kt->utsname,
+                	sizeof(struct new_utsname), "system_utsname", 
+			RETURN_ON_ERROR);
+	else if (symbol_exists("init_uts_ns"))
+		readmem(symbol_value("init_uts_ns") + sizeof(int),
+			KVADDR,  &kt->utsname, sizeof(struct new_utsname), 
+			"init_uts_ns", RETURN_ON_ERROR);
+	else
+		error(INFO, "cannot access utsname information\n\n");
+
+	strncpy(buf, kt->utsname.release, MIN(strlen(kt->utsname.release), 65));
+	if (ascii_string(kt->utsname.release)) {
+		p1 = p2 = buf;
+		while (*p2 != '.')
+			p2++;
+		*p2 = NULLCHAR;
+		kt->kernel_version[0] = atoi(p1);
+		p1 = ++p2;
+		while (*p2 != '.')
+			p2++;
+		*p2 = NULLCHAR;
+		kt->kernel_version[1] = atoi(p1);
+		p1 = ++p2;
+		while ((*p2 >= '0') && (*p2 <= '9'))
+			p2++;
+		*p2 = NULLCHAR;
+		kt->kernel_version[2] = atoi(p1);
+	}
+
+	verify_version();
+
+	if (symbol_exists("__per_cpu_offset")) {
+		i = get_array_length("__per_cpu_offset", NULL, 0);
+		get_symbol_data("__per_cpu_offset", 
+			sizeof(long)*(i <= NR_CPUS ? i : NR_CPUS),
+			&kt->__per_cpu_offset[0]); 
+		kt->flags |= PER_CPU_OFF;
+	}
+	if (STRUCT_EXISTS("runqueue"))
+		rqstruct = "runqueue";
+	else if (STRUCT_EXISTS("rq"))
+		rqstruct = "rq";
+
+	MEMBER_OFFSET_INIT(runqueue_cpu, rqstruct, "cpu");
+	/*
+	 * 'cpu' does not exist in 'struct rq'.
+	 */
+	if (VALID_MEMBER(runqueue_cpu) &&
+	    (get_array_length("runqueue.cpu", NULL, 0) > 0)) {
+		MEMBER_OFFSET_INIT(cpu_s_curr, "cpu_s", "curr");
+		MEMBER_OFFSET_INIT(cpu_s_idle, "cpu_s", "idle");
+	 	STRUCT_SIZE_INIT(cpu_s, "cpu_s"); 
+		kt->runq_siblings = get_array_length("runqueue.cpu", 
+			NULL, 0);
+		if (symbol_exists("__cpu_idx") &&
+		    symbol_exists("__rq_idx")) {
+			if (!readmem(symbol_value("__cpu_idx"), KVADDR, 
+		            &kt->__cpu_idx[0], sizeof(long) * NR_CPUS,
+                            "__cpu_idx[NR_CPUS]", RETURN_ON_ERROR))
+				error(INFO, 
+			            "cannot read __cpu_idx[NR_CPUS] array\n");
+			if (!readmem(symbol_value("__rq_idx"), KVADDR, 
+		            &kt->__rq_idx[0], sizeof(long) * NR_CPUS,
+                            "__rq_idx[NR_CPUS]", RETURN_ON_ERROR))
+				error(INFO, 
+			           "cannot read __rq_idx[NR_CPUS] array\n");
+		} else if (kt->runq_siblings > 1) 
+			error(INFO, 
+     	   "runq_siblings: %d: __cpu_idx and __rq_idx arrays don't exist?\n",
+				kt->runq_siblings);
+	} else {
+		MEMBER_OFFSET_INIT(runqueue_idle, rqstruct, "idle");
+		MEMBER_OFFSET_INIT(runqueue_curr, rqstruct, "curr");
+		ASSIGN_OFFSET(runqueue_cpu) = INVALID_OFFSET;
+	}
+	MEMBER_OFFSET_INIT(runqueue_active, rqstruct, "active");
+	MEMBER_OFFSET_INIT(runqueue_expired, rqstruct, "expired");
+	MEMBER_OFFSET_INIT(runqueue_arrays, rqstruct, "arrays");
+	MEMBER_OFFSET_INIT(prio_array_queue, "prio_array", "queue");
+        MEMBER_OFFSET_INIT(prio_array_nr_active, "prio_array", "nr_active");
+	STRUCT_SIZE_INIT(runqueue, rqstruct); 
+	STRUCT_SIZE_INIT(prio_array, "prio_array"); 
+
+       /*
+        *  In 2.4, smp_send_stop() sets smp_num_cpus back to 1
+        *  in some, but not all, architectures.  So if a count
+        *  of 1 is found, be suspicious, and check the
+        *  init_tasks[NR_CPUS] array (also intro'd in 2.4),
+        *  for idle thread addresses.  For 2.2, prepare for the
+     	*  eventuality by verifying the cpu count with the machine
+	*  dependent count.
+        */
+        if ((kt->flags & SMP) && DUMPFILE() && (kt->cpus == 1)) {
+                if (symbol_exists("init_tasks")) {
+                        ulong init_tasks[NR_CPUS];
+			int nr_cpus;
+
+			BZERO(&init_tasks[0], sizeof(ulong) * NR_CPUS);
+
+			nr_cpus = get_array_length("init_tasks", NULL, 0);
+			if ((nr_cpus < 1) || (nr_cpus > NR_CPUS))
+                                nr_cpus = NR_CPUS;
+
+			get_idle_threads(&init_tasks[0], nr_cpus);
+
+                        for (i = kt->cpus = 0; i < nr_cpus; i++)
+                                if (init_tasks[i])
+                                        kt->cpus++;
+                } else 
+			kt->cpus = machdep->get_smp_cpus();
+	}
+
+	if ((kt->flags & SMP) && ACTIVE() && (kt->cpus == 1) &&
+	    (kt->flags & PER_CPU_OFF))
+		kt->cpus = machdep->get_smp_cpus();
+
+	if (kt->cpus_override && (c = atoi(kt->cpus_override))) {
+		error(WARNING, "forcing cpu count to: %d\n\n", c);
+		kt->cpus = c;
+	}
+
+	if (kt->cpus > NR_CPUS) {
+		error(WARNING, 
+       "%s number of cpus (%d) greater than compiled-in NR_CPUS (%d)\n",
+			kt->cpus_override && atoi(kt->cpus_override) ? 
+			"configured" : "calculated", kt->cpus, NR_CPUS);
+		error(FATAL, "recompile crash with larger NR_CPUS\n");
+	}
+
+	STRUCT_SIZE_INIT(spinlock_t, "spinlock_t");
+	verify_spinlock();
+
+	STRUCT_SIZE_INIT(list_head, "list_head"); 
+	MEMBER_OFFSET_INIT(list_head_next, "list_head", "next"); 
+	MEMBER_OFFSET_INIT(list_head_prev, "list_head", "prev"); 
+	if (OFFSET(list_head_next) != 0)
+	    	error(WARNING, 
+		    "list_head.next offset: %ld: list command may fail\n",
+			OFFSET(list_head_next));
+
+        MEMBER_OFFSET_INIT(hlist_node_next, "hlist_node", "next");
+        MEMBER_OFFSET_INIT(hlist_node_pprev, "hlist_node", "pprev");
+	STRUCT_SIZE_INIT(hlist_head, "hlist_head"); 
+	STRUCT_SIZE_INIT(hlist_node, "hlist_node"); 
+
+	MEMBER_OFFSET_INIT(irq_desc_t_status,  "irq_desc_t", "status");
+	MEMBER_OFFSET_INIT(irq_desc_t_handler, "irq_desc_t", "handler");
+	MEMBER_OFFSET_INIT(irq_desc_t_action, "irq_desc_t", "action");
+	MEMBER_OFFSET_INIT(irq_desc_t_depth, "irq_desc_t", "depth");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_typename, 
+		"hw_interrupt_type", "typename");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_startup,
+		"hw_interrupt_type", "startup");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_shutdown,
+		"hw_interrupt_type", "shutdown");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_handle, 
+                "hw_interrupt_type", "handle");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_enable,
+		"hw_interrupt_type", "enable");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_disable,
+		"hw_interrupt_type", "disable");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_ack, 
+		"hw_interrupt_type", "ack");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_end, 
+		"hw_interrupt_type", "end");
+	MEMBER_OFFSET_INIT(hw_interrupt_type_set_affinity,
+		"hw_interrupt_type", "set_affinity");
+	MEMBER_OFFSET_INIT(irqaction_handler, "irqaction", "handler");
+	MEMBER_OFFSET_INIT(irqaction_flags, "irqaction", "flags");
+	MEMBER_OFFSET_INIT(irqaction_mask, "irqaction", "mask");
+	MEMBER_OFFSET_INIT(irqaction_name, "irqaction", "name");
+	MEMBER_OFFSET_INIT(irqaction_dev_id, "irqaction", "dev_id");
+	MEMBER_OFFSET_INIT(irqaction_next, "irqaction", "next");
+
+	STRUCT_SIZE_INIT(irq_desc_t, "irq_desc_t");
+
+        STRUCT_SIZE_INIT(irq_cpustat_t, "irq_cpustat_t");
+        MEMBER_OFFSET_INIT(irq_cpustat_t___softirq_active, 
+                "irq_cpustat_t", "__softirq_active");
+        MEMBER_OFFSET_INIT(irq_cpustat_t___softirq_mask, 
+                "irq_cpustat_t", "__softirq_mask");
+
+        STRUCT_SIZE_INIT(timer_list, "timer_list");
+        MEMBER_OFFSET_INIT(timer_list_list, "timer_list", "list");
+        MEMBER_OFFSET_INIT(timer_list_next, "timer_list", "next");
+        MEMBER_OFFSET_INIT(timer_list_entry, "timer_list", "entry");
+        MEMBER_OFFSET_INIT(timer_list_expires, "timer_list", "expires");
+        MEMBER_OFFSET_INIT(timer_list_function, "timer_list", "function");
+        STRUCT_SIZE_INIT(timer_vec_root, "timer_vec_root");
+	if (VALID_STRUCT(timer_vec_root))
+               	MEMBER_OFFSET_INIT(timer_vec_root_vec, 
+			"timer_vec_root", "vec");
+        STRUCT_SIZE_INIT(timer_vec, "timer_vec");
+	if (VALID_STRUCT(timer_vec))
+               	MEMBER_OFFSET_INIT(timer_vec_vec, "timer_vec", "vec");
+
+	STRUCT_SIZE_INIT(tvec_root_s, "tvec_root_s");
+        if (VALID_STRUCT(tvec_root_s)) {
+               	STRUCT_SIZE_INIT(tvec_t_base_s, "tvec_t_base_s");
+                MEMBER_OFFSET_INIT(tvec_t_base_s_tv1,
+                        "tvec_t_base_s", "tv1");
+	        MEMBER_OFFSET_INIT(tvec_root_s_vec, 
+			"tvec_root_s", "vec");
+	        STRUCT_SIZE_INIT(tvec_s, "tvec_s");
+	        MEMBER_OFFSET_INIT(tvec_s_vec, "tvec_s", "vec");
+	}
+
+        STRUCT_SIZE_INIT(__wait_queue, "__wait_queue");
+        if (VALID_STRUCT(__wait_queue)) {
+                MEMBER_OFFSET_INIT(__wait_queue_task,
+                        "__wait_queue", "task");
+                MEMBER_OFFSET_INIT(__wait_queue_head_task_list,
+                        "__wait_queue_head", "task_list");
+                MEMBER_OFFSET_INIT(__wait_queue_task_list,
+                        "__wait_queue", "task_list");
+        } else {
+               	STRUCT_SIZE_INIT(wait_queue, "wait_queue");
+		if (VALID_STRUCT(wait_queue)) {
+               		MEMBER_OFFSET_INIT(wait_queue_task, 
+				"wait_queue", "task");
+               		MEMBER_OFFSET_INIT(wait_queue_next, 
+				"wait_queue", "next");
 		}
+	}
 
-		STRUCT_SIZE_INIT(spinlock_t, "spinlock_t");
-		verify_spinlock();
+	STRUCT_SIZE_INIT(pt_regs, "pt_regs");
+	STRUCT_SIZE_INIT(softirq_state, "softirq_state");
+	STRUCT_SIZE_INIT(desc_struct, "desc_struct");
 
-		STRUCT_SIZE_INIT(list_head, "list_head"); 
-		MEMBER_OFFSET_INIT(list_head_next, "list_head", "next"); 
-		MEMBER_OFFSET_INIT(list_head_prev, "list_head", "prev"); 
-		if (OFFSET(list_head_next) != 0)
-		    error(WARNING, 
-			"list_head.next offset: %ld: list command may fail\n",
-				OFFSET(list_head_next));
+	STRUCT_SIZE_INIT(char_device_struct, "char_device_struct");
+	if (VALID_STRUCT(char_device_struct)) {
+		MEMBER_OFFSET_INIT(char_device_struct_next,
+			"char_device_struct", "next");
+		MEMBER_OFFSET_INIT(char_device_struct_name,
+			"char_device_struct", "name");
+		MEMBER_OFFSET_INIT(char_device_struct_fops,
+			"char_device_struct", "fops");
+		MEMBER_OFFSET_INIT(char_device_struct_major,
+			"char_device_struct", "major");
+	}
 
-        	MEMBER_OFFSET_INIT(hlist_node_next, "hlist_node", "next");
-        	MEMBER_OFFSET_INIT(hlist_node_pprev, "hlist_node", "pprev");
-		STRUCT_SIZE_INIT(hlist_head, "hlist_head"); 
-		STRUCT_SIZE_INIT(hlist_node, "hlist_node"); 
+	MEMBER_OFFSET_INIT(module_kallsyms_start, "module", 
+		"kallsyms_start");
 
-		MEMBER_OFFSET_INIT(irq_desc_t_status,  "irq_desc_t", "status");
-		MEMBER_OFFSET_INIT(irq_desc_t_handler, "irq_desc_t", "handler");
-		MEMBER_OFFSET_INIT(irq_desc_t_action, "irq_desc_t", "action");
-		MEMBER_OFFSET_INIT(irq_desc_t_depth, "irq_desc_t", "depth");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_typename, 
-			"hw_interrupt_type", "typename");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_startup,
-			"hw_interrupt_type", "startup");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_shutdown,
-			"hw_interrupt_type", "shutdown");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_handle, 
-                        "hw_interrupt_type", "handle");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_enable,
-			"hw_interrupt_type", "enable");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_disable,
-			"hw_interrupt_type", "disable");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_ack, 
-			"hw_interrupt_type", "ack");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_end, 
-			"hw_interrupt_type", "end");
-		MEMBER_OFFSET_INIT(hw_interrupt_type_set_affinity,
-			"hw_interrupt_type", "set_affinity");
-		MEMBER_OFFSET_INIT(irqaction_handler, "irqaction", "handler");
-		MEMBER_OFFSET_INIT(irqaction_flags, "irqaction", "flags");
-		MEMBER_OFFSET_INIT(irqaction_mask, "irqaction", "mask");
-		MEMBER_OFFSET_INIT(irqaction_name, "irqaction", "name");
-		MEMBER_OFFSET_INIT(irqaction_dev_id, "irqaction", "dev_id");
-		MEMBER_OFFSET_INIT(irqaction_next, "irqaction", "next");
+	STRUCT_SIZE_INIT(kallsyms_header, "kallsyms_header");
 
-		STRUCT_SIZE_INIT(irq_desc_t, "irq_desc_t");
-
-                STRUCT_SIZE_INIT(irq_cpustat_t, "irq_cpustat_t");
-                MEMBER_OFFSET_INIT(irq_cpustat_t___softirq_active, 
-                        "irq_cpustat_t", "__softirq_active");
-                MEMBER_OFFSET_INIT(irq_cpustat_t___softirq_mask, 
-                        "irq_cpustat_t", "__softirq_mask");
-
-                STRUCT_SIZE_INIT(timer_list, "timer_list");
-                MEMBER_OFFSET_INIT(timer_list_list, "timer_list", "list");
-                MEMBER_OFFSET_INIT(timer_list_next, "timer_list", "next");
-                MEMBER_OFFSET_INIT(timer_list_entry, "timer_list", "entry");
-                MEMBER_OFFSET_INIT(timer_list_expires, "timer_list", "expires");
-                MEMBER_OFFSET_INIT(timer_list_function, 
-                        "timer_list", "function");
-                STRUCT_SIZE_INIT(timer_vec_root, "timer_vec_root");
-		if (VALID_STRUCT(timer_vec_root))
-                	MEMBER_OFFSET_INIT(timer_vec_root_vec, 
-				"timer_vec_root", "vec");
-                STRUCT_SIZE_INIT(timer_vec, "timer_vec");
-		if (VALID_STRUCT(timer_vec))
-                	MEMBER_OFFSET_INIT(timer_vec_vec, "timer_vec", "vec");
-
-	        STRUCT_SIZE_INIT(tvec_root_s, "tvec_root_s");
-                if (VALID_STRUCT(tvec_root_s)) {
-                	STRUCT_SIZE_INIT(tvec_t_base_s, "tvec_t_base_s");
-                        MEMBER_OFFSET_INIT(tvec_t_base_s_tv1,
-                                "tvec_t_base_s", "tv1");
-	               	MEMBER_OFFSET_INIT(tvec_root_s_vec, 
-				"tvec_root_s", "vec");
-	                STRUCT_SIZE_INIT(tvec_s, "tvec_s");
-	               	MEMBER_OFFSET_INIT(tvec_s_vec, "tvec_s", "vec");
-		}
-
-                STRUCT_SIZE_INIT(__wait_queue, "__wait_queue");
-                if (VALID_STRUCT(__wait_queue)) {
-                        MEMBER_OFFSET_INIT(__wait_queue_task,
-                                "__wait_queue", "task");
-                        MEMBER_OFFSET_INIT(__wait_queue_head_task_list,
-                                "__wait_queue_head", "task_list");
-                        MEMBER_OFFSET_INIT(__wait_queue_task_list,
-                                "__wait_queue", "task_list");
-                } else {
-                	STRUCT_SIZE_INIT(wait_queue, "wait_queue");
-			if (VALID_STRUCT(wait_queue)) {
-                		MEMBER_OFFSET_INIT(wait_queue_task, 
-					"wait_queue", "task");
-                		MEMBER_OFFSET_INIT(wait_queue_next, 
-					"wait_queue", "next");
-			}
-		}
-
-		STRUCT_SIZE_INIT(pt_regs, "pt_regs");
-		STRUCT_SIZE_INIT(softirq_state, "softirq_state");
-		STRUCT_SIZE_INIT(desc_struct, "desc_struct");
-
-		STRUCT_SIZE_INIT(char_device_struct, "char_device_struct");
-		if (VALID_STRUCT(char_device_struct)) {
-			MEMBER_OFFSET_INIT(char_device_struct_next,
-				"char_device_struct", "next");
-			MEMBER_OFFSET_INIT(char_device_struct_name,
-				"char_device_struct", "name");
-			MEMBER_OFFSET_INIT(char_device_struct_fops,
-				"char_device_struct", "fops");
-			MEMBER_OFFSET_INIT(char_device_struct_major,
-				"char_device_struct", "major");
-		}
-
-	        MEMBER_OFFSET_INIT(module_kallsyms_start, "module", 
-			"kallsyms_start");
-
-		STRUCT_SIZE_INIT(kallsyms_header, "kallsyms_header");
-
-		if (VALID_MEMBER(module_kallsyms_start) &&
-		    VALID_SIZE(kallsyms_header)) {
-        		MEMBER_OFFSET_INIT(kallsyms_header_sections,
-				"kallsyms_header", "sections");
-        		MEMBER_OFFSET_INIT(kallsyms_header_section_off,
-				"kallsyms_header", "section_off");
-        		MEMBER_OFFSET_INIT(kallsyms_header_symbols,
-				"kallsyms_header", "symbols");
-        		MEMBER_OFFSET_INIT(kallsyms_header_symbol_off,
-				"kallsyms_header", "symbol_off");
-        		MEMBER_OFFSET_INIT(kallsyms_header_string_off,
-				"kallsyms_header", "string_off");
-        		MEMBER_OFFSET_INIT(kallsyms_symbol_section_off,
-				"kallsyms_symbol", "section_off");
-        		MEMBER_OFFSET_INIT(kallsyms_symbol_symbol_addr,
-				"kallsyms_symbol", "symbol_addr");
-        		MEMBER_OFFSET_INIT(kallsyms_symbol_name_off,
-				"kallsyms_symbol", "name_off");
-        		MEMBER_OFFSET_INIT(kallsyms_section_start,
-				"kallsyms_section", "start");
-        		MEMBER_OFFSET_INIT(kallsyms_section_size,
-				"kallsyms_section", "size");
-        		MEMBER_OFFSET_INIT(kallsyms_section_name_off,
-				"kallsyms_section", "name_off");
-			STRUCT_SIZE_INIT(kallsyms_symbol, "kallsyms_symbol");
-			STRUCT_SIZE_INIT(kallsyms_section, "kallsyms_section");
+	if (VALID_MEMBER(module_kallsyms_start) &&
+	    VALID_SIZE(kallsyms_header)) {
+        	MEMBER_OFFSET_INIT(kallsyms_header_sections,
+			"kallsyms_header", "sections");
+        	MEMBER_OFFSET_INIT(kallsyms_header_section_off,
+			"kallsyms_header", "section_off");
+        	MEMBER_OFFSET_INIT(kallsyms_header_symbols,
+			"kallsyms_header", "symbols");
+        	MEMBER_OFFSET_INIT(kallsyms_header_symbol_off,
+			"kallsyms_header", "symbol_off");
+        	MEMBER_OFFSET_INIT(kallsyms_header_string_off,
+			"kallsyms_header", "string_off");
+        	MEMBER_OFFSET_INIT(kallsyms_symbol_section_off,
+			"kallsyms_symbol", "section_off");
+        	MEMBER_OFFSET_INIT(kallsyms_symbol_symbol_addr,
+			"kallsyms_symbol", "symbol_addr");
+        	MEMBER_OFFSET_INIT(kallsyms_symbol_name_off,
+			"kallsyms_symbol", "name_off");
+        	MEMBER_OFFSET_INIT(kallsyms_section_start,
+			"kallsyms_section", "start");
+        	MEMBER_OFFSET_INIT(kallsyms_section_size,
+			"kallsyms_section", "size");
+        	MEMBER_OFFSET_INIT(kallsyms_section_name_off,
+			"kallsyms_section", "name_off");
+		STRUCT_SIZE_INIT(kallsyms_symbol, "kallsyms_symbol");
+		STRUCT_SIZE_INIT(kallsyms_section, "kallsyms_section");
 			
-			if (!(kt->flags & NO_KALLSYMS))
-				kt->flags |= KALLSYMS_V1;
-		}
+		if (!(kt->flags & NO_KALLSYMS))
+			kt->flags |= KALLSYMS_V1;
+	}
 
-		MEMBER_OFFSET_INIT(module_num_symtab, "module", "num_symtab");
+	MEMBER_OFFSET_INIT(module_num_symtab, "module", "num_symtab");
 
-		if (VALID_MEMBER(module_num_symtab)) {
-			MEMBER_OFFSET_INIT(module_symtab, "module", "symtab");
-			MEMBER_OFFSET_INIT(module_strtab, "module", "strtab");
+	if (VALID_MEMBER(module_num_symtab)) {
+		MEMBER_OFFSET_INIT(module_symtab, "module", "symtab");
+		MEMBER_OFFSET_INIT(module_strtab, "module", "strtab");
 			
-			if (!(kt->flags & NO_KALLSYMS))
-				kt->flags |= KALLSYMS_V2;
-		}
-		break;
+		if (!(kt->flags & NO_KALLSYMS))
+			kt->flags |= KALLSYMS_V2;
 	}
 }
 
@@ -1921,8 +1927,8 @@ module_init(void)
 					return;
 				}
 
-				if (IS_VMALLOC_ADDR(list.next) &&
-				    IS_VMALLOC_ADDR(list.prev)) {
+				if (IS_VMALLOC_ADDR((ulong)list.next) &&
+				    IS_VMALLOC_ADDR((ulong)list.prev)) {
 					kt->kernel_module = sp->value;
 					kt->module_list = (ulong)list.next;
 					modules_found = TRUE;
@@ -2903,6 +2909,8 @@ cmd_sys(void)
         do {
                 if (sflag)
                         dump_sys_call_table(args[optind], cnt++);
+		else if (STREQ(args[optind], "config"))
+			read_in_kernel_config(IKCFG_READ);
                 else
                         cmd_usage(args[optind], COMPLETE_HELP);
                 optind++;
@@ -3181,9 +3189,9 @@ dump_sys_call_table(char *spec, int cnt)
 	struct syment *sp, *spn;
         long size;
 #ifdef S390X
-	unsigned int *sct, *sys_call_table, addr;
+	unsigned int *sct, *sys_call_table, sys_ni_syscall, addr;
 #else
-	ulong *sys_call_table, *sct, addr;
+	ulong *sys_call_table, *sct, sys_ni_syscall, addr;
 #endif
 	if (GDB_PATCHED())
 		error(INFO, "line numbers are not available\n"); 
@@ -3201,6 +3209,8 @@ dump_sys_call_table(char *spec, int cnt)
         readmem(symbol_value("sys_call_table"), KVADDR, sys_call_table,
                 size, "sys_call_table", FAULT_ON_ERROR);
 
+	sys_ni_syscall = symbol_value("sys_ni_syscall");
+
 	if (spec)
 		open_tmpfile();
 
@@ -3213,13 +3223,17 @@ dump_sys_call_table(char *spec, int cnt)
 					"%3x  " : "%3d  ", i);
 				fprintf(fp, 
 			    	    "invalid sys_call_table entry: %lx (%s)\n", 
-					*sct, value_to_symstr(*sct, buf1, 0));
+					(unsigned long)*sct,
+					value_to_symstr(*sct, buf1, 0));
 			}
 			continue;
 		}
 		
 		fprintf(fp, (output_radix == 16) ? "%3x  " : "%3d  ", i);
-		fprintf(fp, "%-26s ", scp);
+  		if (sys_ni_syscall && *sct == sys_ni_syscall)
+			fprintf(fp, "%-26s ", "sys_ni_syscall");
+		else
+			fprintf(fp, "%-26s ", scp);
 
 		/*
 		 *  For system call symbols whose first instruction is
@@ -3362,6 +3376,8 @@ dump_kernel_table(int verbose)
 		fprintf(fp, "%sUSE_OLD_BT", others++ ? "|" : "");
 	if (kt->flags & ARCH_XEN)
 		fprintf(fp, "%sARCH_XEN", others++ ? "|" : "");
+	if (kt->flags & NO_IKCONFIG)
+		fprintf(fp, "%sNO_IKCONFIG", others++ ? "|" : "");
 	fprintf(fp, ")\n");
         fprintf(fp, "         stext: %lx\n", kt->stext);
         fprintf(fp, "         etext: %lx\n", kt->etext);
@@ -3371,6 +3387,7 @@ dump_kernel_table(int verbose)
         fprintf(fp, "      init_end: %lx\n", kt->init_end);
         fprintf(fp, "           end: %lx\n", kt->end);
         fprintf(fp, "          cpus: %d\n", kt->cpus);
+        fprintf(fp, " cpus_override: %s\n", kt->cpus_override);
         fprintf(fp, "       NR_CPUS: %d (compiled-in to this version of %s)\n",
 		NR_CPUS, pc->program_name); 
 	fprintf(fp, "kernel_NR_CPUS: %d\n", kt->kernel_NR_CPUS);
@@ -3427,7 +3444,7 @@ dump_kernel_table(int verbose)
         if (kt->xen_flags & XEN_SUSPEND)
                 fprintf(fp, "%sXEN_SUSPEND", others++ ? "|" : "");
 	fprintf(fp, ")\n");
-	fprintf(fp, "      machine_to_pseudo: %lx\n", (ulong)kt->machine_to_pseudo);
+	fprintf(fp, "               m2p_page: %lx\n", (ulong)kt->m2p_page);
         fprintf(fp, "phys_to_machine_mapping: %lx\n", kt->phys_to_machine_mapping);
         fprintf(fp, "         p2m_table_size: %ld\n", kt->p2m_table_size);
 	fprintf(fp, " p2m_mapping_cache[%d]: %s\n", P2M_MAPPING_CACHE,
@@ -4315,7 +4332,7 @@ next_cpu:
 }
 
 /*
- *  2.6 per-cpu timers, using "per_cpu__tvec_bases".  XXX
+ *  2.6 per-cpu timers, using "per_cpu__tvec_bases".
  */
 
 static void
@@ -4389,8 +4406,12 @@ next_cpu:
         else
                 tvec_bases =  symbol_value("per_cpu__tvec_bases");
 
-        fprintf(fp, "TVEC_BASES[%d]: %lx\n", cpu,
-                tvec_bases + SIZE(tvec_t_base_s));
+	if (symbol_exists("boot_tvec_bases")) {
+		readmem(tvec_bases, KVADDR, &tvec_bases, sizeof(void *),
+                        "per-cpu tvec_bases", FAULT_ON_ERROR);
+        }
+
+        fprintf(fp, "TVEC_BASES[%d]: %lx\n", cpu, tvec_bases);
 		
         sprintf(buf1, "%ld", highest);
         flen = MAX(strlen(buf1), strlen("JIFFIES"));
@@ -4488,6 +4509,11 @@ init_tv_ranges(struct tv_range *tv, int vec_root_size, int vec_size, int cpu)
 				kt->__per_cpu_offset[cpu];
 		else		
 			tvec_bases =  symbol_value("per_cpu__tvec_bases");
+
+		if (symbol_exists("boot_tvec_bases")) {
+			readmem(tvec_bases, KVADDR, &tvec_bases, sizeof(void *), 
+				"per-cpu tvec_bases", FAULT_ON_ERROR);
+		}
 
                 tv[1].base = tvec_bases +
                         OFFSET(tvec_t_base_s_tv1);
@@ -4890,60 +4916,70 @@ clear_machdep_cache(void)
 }
 
 /*
- *  For kernels containing cpu_online_map, count the bits.
+ *  For kernels containing at least the cpu_online_map, use it
+ *  to determine the cpu count.
  */
 int
 get_cpus_online()
 {
-	ulong cpu_online_map;
+	int i, len, online;
+	struct gnu_request req;
+	char *buf;
+	ulong *maskptr;
 
 	if (!symbol_exists("cpu_online_map")) 
 		return 0;
 
-	get_symbol_data("cpu_online_map", sizeof(ulong), &cpu_online_map);
+	len = get_symbol_type("cpu_online_map", NULL, &req) == TYPE_CODE_UNDEF ?
+		sizeof(ulong) : req.length;
+	buf = GETBUF(len);
 
-	return count_bits_long(cpu_online_map);
+	online = 0;
+
+        if (readmem(symbol_value("cpu_online_map"), KVADDR, buf, len,
+            "cpu_online_map", RETURN_ON_ERROR)) {
+
+		maskptr = (ulong *)buf;
+		for (i = 0; i < (len/sizeof(ulong)); i++, maskptr++)
+			online += count_bits_long(*maskptr);
+
+		FREEBUF(buf);
+		if (CRASHDEBUG(1))
+			error(INFO, "get_cpus_online: online: %d\n", online);
+	}
+
+	return online;
 }
 
 /*
- *  xen machine-address to pseudo-physical-address translators.
+ *  Xen machine-address to pseudo-physical-page translator.
  */ 
-ulong
-xen_machine_to_pseudo(ulong machine)
+ulonglong
+xen_m2p(ulonglong machine)
 {
 	ulong mfn, pfn;
 
 	mfn = XEN_MACHINE_TO_MFN(machine);
-	pfn = __xen_machine_to_pseudo((ulonglong)machine, mfn);
+	pfn = __xen_m2p(machine, mfn);
 
-	if (pfn == XEN_MFN_NOT_FOUND)
-		return XEN_MFN_NOT_FOUND;
-	
+	if (pfn == XEN_MFN_NOT_FOUND) {
+		if (CRASHDEBUG(1))
+			error(INFO, 
+			    "xen_machine_to_pseudo_PAE: machine address %lx not found\n",
+                           	 machine);
+		return XEN_MACHADDR_NOT_FOUND;
+	}
+
 	return XEN_PFN_TO_PSEUDO(pfn);
-
-}
-
-ulonglong
-xen_machine_to_pseudo_PAE(ulonglong machine)
-{
-	ulong mfn, pfn;
-
-	mfn = XEN_MACHINE_TO_MFN_PAE(machine);
-	pfn = __xen_machine_to_pseudo(machine, mfn);
-
-	if (pfn == XEN_MFN_NOT_FOUND)
-		return XEN_MFN_NOT_FOUND_PAE;
-
-	return XEN_PFN_TO_PSEUDO_PAE(pfn);
 }
 
 static ulong
-__xen_machine_to_pseudo(ulonglong machine, ulong mfn)
+__xen_m2p(ulonglong machine, ulong mfn)
 {
 	ulong mapping, kmfn, pfn, p, i, c;
 	ulong *mp;
 
-	mp = (ulong *)kt->machine_to_pseudo;
+	mp = (ulong *)kt->m2p_page;
 	mapping = kt->phys_to_machine_mapping;
 
 	/*
@@ -4971,7 +5007,7 @@ __xen_machine_to_pseudo(ulonglong machine, ulong mfn)
 
                                 	if (CRASHDEBUG(1))
                                     	    console("(cached) mfn: %lx (%llx) p: %ld"
-                                        	" i: %ld pfn: %lx (%lx)\n",
+                                        	" i: %ld pfn: %lx (%llx)\n",
 						mfn, machine, p,
 						i, pfn, XEN_PFN_TO_PSEUDO(pfn));
 					kt->p2m_cache_hits++;
@@ -5011,7 +5047,7 @@ __xen_machine_to_pseudo(ulonglong machine, ulong mfn)
 				pfn = p + i;
 				if (CRASHDEBUG(1))
 				    console("pages: %d mfn: %lx (%llx) p: %ld"
-					" i: %ld pfn: %lx (%lx)\n",
+					" i: %ld pfn: %lx (%llx)\n",
 					(p/XEN_PFNS_PER_PAGE)+1, mfn, machine,
 					p, i, pfn, XEN_PFN_TO_PSEUDO(pfn));
 
@@ -5031,4 +5067,255 @@ __xen_machine_to_pseudo(ulonglong machine, ulong mfn)
 		console("machine address %llx not found\n", machine);
 
 	return (XEN_MFN_NOT_FOUND);
+}
+
+
+/*
+ *  Read the relevant IKCONFIG (In Kernel Config) data if available.
+ */
+
+static char *ikconfig[] = {
+        "CONFIG_NR_CPUS",
+        "CONFIG_PGTABLE_4",
+        "CONFIG_HZ",
+        NULL,
+};
+
+void
+read_in_kernel_config(int command)
+{
+	struct syment *sp;
+	int ii, jj, ret, end, found=0;
+	unsigned long size, bufsz;
+	char *pos, *ln, *buf, *head, *tail, *val, *uncomp;
+	char line[512];
+	z_stream stream;
+
+	if ((kt->flags & NO_IKCONFIG) && !(pc->flags & RUNTIME))
+		return;
+
+	if ((sp = symbol_search("kernel_config_data")) == NULL) {
+		if (command == IKCFG_READ)
+			error(FATAL, 
+			    "kernel_config_data does not exist in this kernel\n");
+		return;
+	}
+	
+	/* We don't know how large IKCONFIG is, so we start with 
+	 * 32k, if we can't find MAGIC_END assume we didn't read 
+	 * enough, double it and try again.
+	 */
+	ii = 32;
+
+again:
+	size = ii * 1024;
+
+	if ((buf = (char *)malloc(size)) == NULL) {
+		error(WARNING, "cannot malloc IKCONFIG input buffer\n");
+		return;
+	}
+	
+        if (!readmem(sp->value, KVADDR, buf, size,
+            "kernel_config_data", RETURN_ON_ERROR)) {
+		error(WARNING, "cannot read kernel_config_data\n");
+		goto out2;
+	}
+		
+	/* Find the start */
+	if (strstr(buf, MAGIC_START))
+		head = buf + MAGIC_SIZE + 10; /* skip past MAGIC_START and gzip header */
+	else {
+		error(WARNING, "could not find MAGIC_START!\n");
+		goto out2;
+	}
+
+	tail = head;
+
+	end = strlen(MAGIC_END);
+
+	/* Find the end*/
+	while (tail < (buf + (size - 1))) {
+		
+		if (strncmp(tail, MAGIC_END, end)==0) {
+			found = 1;
+			break;
+		}
+		tail++;
+	}
+
+	if (found) {
+		bufsz = tail - head;
+		size = 10 * bufsz;
+		if ((uncomp = (char *)malloc(size)) == NULL) {
+			error(WARNING, "cannot malloc IKCONFIG output buffer\n");
+			goto out2;
+		}
+	} else {
+		if (ii > 512) {
+			error(WARNING, "could not find MAGIC_END!\n");
+			goto out2;
+		} else {
+			free(buf);
+			ii *= 2;
+			goto again;
+		}
+	}
+
+
+	/* initialize zlib */
+	stream.next_in = (Bytef *)head;
+	stream.avail_in = (uInt)bufsz;
+
+	stream.next_out = (Bytef *)uncomp;
+	stream.avail_out = (uInt)size;
+
+	stream.zalloc = NULL;
+	stream.zfree = NULL;
+	stream.opaque = NULL;
+
+	ret = inflateInit2(&stream, -MAX_WBITS);
+	if (ret != Z_OK) {
+		read_in_kernel_config_err(ret, "initialize");
+		goto out1;
+	}
+
+	ret = inflate(&stream, Z_FINISH);
+
+	if (ret != Z_STREAM_END) {
+		inflateEnd(&stream);
+		if (ret == Z_NEED_DICT || 
+		   (ret == Z_BUF_ERROR && stream.avail_in == 0)) {
+			read_in_kernel_config_err(Z_DATA_ERROR, "uncompress");
+			goto out1;
+		}
+		read_in_kernel_config_err(ret, "uncompress");
+		goto out1;
+	}
+	size = stream.total_out;
+
+	ret = inflateEnd(&stream);
+
+	pos = uncomp;
+
+	do {
+		ret = sscanf(pos, "%511[^\n]\n%n", line, &ii);
+		if (ret > 0) {
+			if ((command == IKCFG_READ) || CRASHDEBUG(8))
+				fprintf(fp, "%s\n", line);
+
+			pos += ii;
+
+			ln = line;
+				
+			/* skip leading whitespace */
+			while (whitespace(*ln))
+				ln++;
+
+			/* skip comments */
+			if (*ln == '#')
+				continue;
+
+			/* Find '=' */
+			if ((head = strchr(ln, '=')) != NULL) {
+				*head = '\0';
+				val = head + 1;
+
+				head--;
+
+				/* skip trailing whitespace */
+				while (whitespace(*head)) {
+					*head = '\0';
+					head--;
+				}
+
+				/* skip whitespace */
+				while (whitespace(*val))
+					val++;
+
+			} else /* Bad line, skip it */
+				continue;
+
+			if (command != IKCFG_INIT)
+				continue;
+
+			for (jj = 0; ikconfig[jj]; jj++) {
+				 if (STREQ(ln, ikconfig[jj])) {
+
+					if (STREQ(ln, "CONFIG_NR_CPUS")) {
+						kt->kernel_NR_CPUS = atoi(val);
+						if (CRASHDEBUG(1)) 
+							error(INFO, 
+							    "CONFIG_NR_CPUS: %d\n",
+								kt->kernel_NR_CPUS);
+
+					} else if (STREQ(ln, "CONFIG_PGTABLE_4")) {
+						machdep->flags |= VM_4_LEVEL;
+						if (CRASHDEBUG(1))
+							error(INFO, "CONFIG_PGTABLE_4\n");
+
+					} else if (STREQ(ln, "CONFIG_HZ")) {
+						machdep->hz = atoi(val);
+						if (CRASHDEBUG(1))
+							error(INFO, 
+							    "CONFIG_HZ: %d\n",
+								machdep->hz);
+					}
+				}
+			}
+		}
+	} while (ret > 0);
+
+out1:
+	free(uncomp);
+out2:
+	free(buf);
+
+	return;
+}
+
+static void
+read_in_kernel_config_err(int e, char *msg)
+{
+	error(WARNING, "zlib could not %s\n", msg);
+	switch (e) {
+		case Z_OK:
+			fprintf(fp, "Z_OK\n");
+			break;
+
+		case Z_STREAM_END:
+			fprintf(fp, "Z_STREAM_END\n");
+			break;
+
+		case Z_NEED_DICT:
+			fprintf(fp, "Z_NEED_DICT\n");
+			break;
+		
+		case Z_ERRNO:
+			fprintf(fp, "Z_ERNO\n");
+			break;
+
+		case Z_STREAM_ERROR:
+			fprintf(fp, "Z_STREAM\n");
+			break;
+
+		case Z_DATA_ERROR: 
+			fprintf(fp, "Z_DATA_ERROR\n");
+			break;
+
+		case Z_MEM_ERROR: /* out of memory */
+			fprintf(fp, "Z_MEM_ERROR\n");
+			break;
+
+		case Z_BUF_ERROR: /* not enough room in output buf */
+			fprintf(fp, "Z_BUF_ERROR\n");
+			break;
+		
+		case Z_VERSION_ERROR:
+			fprintf(fp, "Z_VERSION_ERROR\n");
+			break;
+
+		default: 
+			fprintf(fp, "UNKNOWN ERROR: %d\n", e);
+			break;
+	}
 }

@@ -1,8 +1,8 @@
 /* main.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,6 +42,8 @@ static struct option long_options[] = {
 	{"version", 0, 0, 0},
 	{"buildinfo", 0, 0, 0},
 	{"shadow_page_tables", 0, 0, 0},
+        {"cpus", 1, 0, 0},
+        {"no_ikconfig", 0, 0, 0},
         {0, 0, 0, 0}
 };
 
@@ -57,7 +59,7 @@ main(int argc, char **argv)
 	 */
 	opterr = 0;
 	optind = 0;
-	while((c = getopt_long(argc, argv, "LgH:h:e:i:sSvc:d:tfp:",
+	while((c = getopt_long(argc, argv, "LgH:h:e:i:sSvc:d:tfp:m:",
        		long_options, &option_index)) != -1) {
 		switch (c)
 		{
@@ -77,6 +79,10 @@ main(int argc, char **argv)
 		        if (STREQ(long_options[option_index].name, 
 			    "no_modules")) 
 				kt->flags |= NO_MODULE_ACCESS;
+
+		        if (STREQ(long_options[option_index].name, 
+			    "no_ikconfig")) 
+				kt->flags |= NO_IKCONFIG;
 
 		        if (STREQ(long_options[option_index].name, 
 			    "no_namelist_gzip")) 
@@ -133,6 +139,9 @@ main(int argc, char **argv)
 			    "shadow_page_tables")) 
 				kt->xen_flags |= SHADOW_PAGE_TABLES;
 
+		        if (STREQ(long_options[option_index].name, "cpus")) 
+				kt->cpus_override = optarg;
+
 			break;
 
 		case 'f':
@@ -178,7 +187,7 @@ main(int argc, char **argv)
 		case 's':
 			pc->flags |= SILENT;
 			pc->flags &= ~SCROLL;
-			pc->scroll_command = SCROLL_NONE;
+//   			pc->scroll_command = SCROLL_NONE;   (why?)
 			break;
 
 		case 'L':
@@ -205,6 +214,10 @@ main(int argc, char **argv)
 
 		case 'p':
 			force_page_size(optarg);
+			break;
+
+		case 'm':
+			machdep->cmdline_arg = optarg;
 			break;
 
 		default:
@@ -371,8 +384,6 @@ main(int argc, char **argv)
 	machdep_init(PRE_SYMTAB);
         symtab_init();
 	machdep_init(PRE_GDB);
-//	kernel_init(PRE_GDB);
-//	verify_version();
         datatype_init();
 
 	/*
@@ -397,9 +408,8 @@ main_loop(void)
 {
         if (!(pc->flags & GDB_INIT)) {
 		gdb_session_init();
-		kernel_init(PRE_GDB);
-		verify_version();
-		kernel_init(POST_GDB);
+		read_in_kernel_config(IKCFG_INIT);
+		kernel_init();
 		machdep_init(POST_GDB);
         	vm_init();
         	hq_init();
@@ -497,6 +507,9 @@ reattempt:
 
 	pc->curcmd = pc->program_name;
 	error(INFO, "command not found: %s\n", args[0]);
+
+	if (pc->curcmd_flags & REPEAT)
+		pc->curcmd_flags &= ~REPEAT;
 }
 
 
@@ -1070,6 +1083,17 @@ dump_program_context(void)
 	fprintf(fp, "          cur_req: %lx\n", (ulong)pc->cur_req);
 	fprintf(fp, "        cmdgencur: %ld\n", pc->cmdgencur); 
 	fprintf(fp, "       cmdgenspec: %ld\n", pc->cmdgenspec); 
+	fprintf(fp, "     curcmd_flags: %lx (", pc->curcmd_flags);
+	others = 0;
+        if (pc->curcmd_flags & XEN_MACHINE_ADDR)
+		fprintf(fp, "%sXEN_MACHINE_ADDR", others ? "|" : "");
+        if (pc->curcmd_flags & REPEAT)
+		fprintf(fp, "%sREPEAT", others ? "|" : "");
+        if (pc->curcmd_flags & IDLE_TASK_SHOWN)
+		fprintf(fp, "%sIDLE_TASK_SHOWN", others ? "|" : "");
+        if (pc->curcmd_flags & TASK_SPECIFIED)
+		fprintf(fp, "%sTASK_SPECIFIED", others ? "|" : "");
+	fprintf(fp, ")\n");
 	fprintf(fp, "       sigint_cnt: %d\n", pc->sigint_cnt);
 	fprintf(fp, "        sigaction: %lx\n", (ulong)&pc->sigaction);
 	fprintf(fp, "    gdb_sigaction: %lx\n", (ulong)&pc->gdb_sigaction);
@@ -1104,6 +1128,8 @@ dump_program_context(void)
 		fprintf(fp, "          readmem: read_daemon()\n");
 	else if (pc->readmem == read_netdump)
 		fprintf(fp, "          readmem: read_netdump()\n");
+	else if (pc->readmem == read_xendump)
+		fprintf(fp, "          readmem: read_xendump()\n");
 	else if (pc->readmem == read_kdump)
 		fprintf(fp, "          readmem: read_kdump()\n");
 	else if (pc->readmem == read_memory_device)
@@ -1120,6 +1146,8 @@ dump_program_context(void)
                 fprintf(fp, "         writemem: write_daemon()\n");
         else if (pc->writemem == write_netdump)
                 fprintf(fp, "         writemem: write_netdump()\n");
+        else if (pc->writemem == write_xendump)
+                fprintf(fp, "         writemem: write_xendump()\n");
         else if (pc->writemem == write_kdump)
                 fprintf(fp, "         writemem: write_kdump()\n");
         else if (pc->writemem == write_memory_device)

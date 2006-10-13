@@ -1,8 +1,8 @@
 /* cmdline.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -928,6 +928,7 @@ restore_sanity(void)
 	pc->pipe_pid = 0;
 	pc->pipe_shell_pid = 0;
 	pc->sbrk = sbrk(0);
+	pc->curcmd_flags = 0;
 
 	restore_gdb_sanity();
 
@@ -1709,13 +1710,18 @@ cmd_repeat(void)
 		error(FATAL, 
 		"scrolling must be turned off when repeating an input file\n");
 
+	pc->curcmd_flags |= REPEAT;
+
 	while (TRUE) {
 		optind = 0;
-console("exec_command...\n");
+
 		exec_command();
 		free_all_bufs();
 
 		if (received_SIGINT() || !output_open())
+			break;
+
+		if (!(pc->curcmd_flags & REPEAT))
 			break;
 
 		if (delay)

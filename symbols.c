@@ -1159,7 +1159,7 @@ store_module_symbols_v2(ulong total, int mods_installed)
 				mod_name);
                 	strncpy(lm->mod_name, mod_name, MAX_MOD_NAME-1);
 		}
-		if (CRASHDEBUG(1))
+		if (CRASHDEBUG(3))
 			fprintf(fp, 
 			    "%lx (%lx): %s syms: %d gplsyms: %d ksyms: %ld\n", 
 				mod, lm->mod_base, lm->mod_name, nsyms, 
@@ -2121,6 +2121,8 @@ dump_symbol_table(void)
                 fprintf(fp, "%sFORCE_DEBUGINFO", others++ ? "|" : "");
         if (st->flags & CRC_MATCHES)
                 fprintf(fp, "%sCRC_MATCHES", others++ ? "|" : "");
+        if (st->flags & ADD_SYMBOL_FILE)
+                fprintf(fp, "%sADD_SYMBOL_FILE", others++ ? "|" : "");
         fprintf(fp, ")\n");
 
 	fprintf(fp, "                 bfd: %lx\n", (ulong)st->bfd);
@@ -4650,6 +4652,27 @@ dump_enumerator_list(char *e)
 }
 
 /*
+ *  Given the name of an enum, return its value.
+ */
+int 
+enumerator_value(char *e, long *value) 
+{
+	struct datatype_member datatype_member, *dm;
+
+	dm = &datatype_member;
+
+        if (arg_to_datatype(e, dm, RETURN_ON_ERROR)) {
+                if ((dm->size >= 0) && 
+		    (dm->type == ENUM) && dm->tagname) {
+			*value = dm->value;
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+/*
  *  Verify that a datatype exists, but return on error.
  */
 int
@@ -5095,7 +5118,8 @@ parse_for_member(struct datatype_member *dm, ulong flag)
 
 	s = dm->member;
 	indent = 0;
-	on = array = FALSE;
+	array = FALSE;
+	on = 0;
 	rewind(pc->tmpfile);
 
 	switch (flag)  
@@ -5106,7 +5130,7 @@ parse_for_member(struct datatype_member *dm, ulong flag)
 next_item:
 		while (fgets(buf, BUFSIZE, pc->tmpfile)) {
 			if (STRNEQ(buf, lookfor1) || STRNEQ(buf, lookfor2)) {
-				on = TRUE;
+				on++;
 				if (strstr(buf, "= {")) 
 					indent = count_leading_spaces(buf);
 				if (strstr(buf, "["))
@@ -5114,16 +5138,22 @@ next_item:
 			}
 	
 			if (on) {
+				if ((indent && (on > 1) && (count_leading_spaces(buf) == indent) &&
+				    !strstr(buf, "}")) || (buf[0] == '}')) {
+					break;
+				}
 				fprintf(pc->saved_fp, buf);
 				if (!indent)
 					break;
 				if (strstr(buf, "}") && 
 				    (count_leading_spaces(buf) == indent))
 					break;
+				on++;
 			}
 		}
 		if (array) {
 			on = array = FALSE;
+			on = 0;
 			goto next_item; 
 		}
 		break;
@@ -5665,6 +5695,8 @@ dump_offset_table(char *spec, ulong makestruct)
         	OFFSET(signal_struct_count));
 	fprintf(fp, "          signal_struct_action: %ld\n",
         	OFFSET(signal_struct_action));
+	fprintf(fp, "  signal_struct_shared_pending: %ld\n",
+        	OFFSET(signal_struct_shared_pending));
         fprintf(fp, "        task_struct_start_time: %ld\n",
                 OFFSET(task_struct_start_time));
         fprintf(fp, "             task_struct_times: %ld\n",
@@ -5790,6 +5822,14 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(mm_struct_total_vm));
 	fprintf(fp, "          mm_struct_start_code: %ld\n", 
 		OFFSET(mm_struct_start_code));
+	fprintf(fp, "           mm_struct_arg_start: %ld\n", 
+		OFFSET(mm_struct_arg_start));
+	fprintf(fp, "             mm_struct_arg_end: %ld\n", 
+		OFFSET(mm_struct_arg_end));
+	fprintf(fp, "           mm_struct_env_start: %ld\n", 
+		OFFSET(mm_struct_env_start));
+	fprintf(fp, "             mm_struct_env_end: %ld\n", 
+		OFFSET(mm_struct_env_end));
 
 	fprintf(fp, "          vm_area_struct_vm_mm: %ld\n", 
 		OFFSET(vm_area_struct_vm_mm));
@@ -6602,6 +6642,8 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                      in6_addr: %ld\n", SIZE(in6_addr));
 	fprintf(fp, "                 signal_struct: %ld\n", 
 		SIZE(signal_struct));
+	fprintf(fp, "             sigpending_signal: %ld\n", 
+		SIZE(sigpending_signal));
 	fprintf(fp, "                  signal_queue: %ld\n", 
 		SIZE(signal_queue));
 	fprintf(fp, "                      sigqueue: %ld\n", SIZE(sigqueue));
@@ -7320,7 +7362,9 @@ add_symbol_file(struct load_module *lm)
 	if (!CRASHDEBUG(1))
 		req->fp = pc->nullfp;
 
+	st->flags |= ADD_SYMBOL_FILE;
 	gdb_interface(req); 
+	st->flags &= ~ADD_SYMBOL_FILE;
 
 	sprintf(buf, "set complaints 0");
 	gdb_pass_through(buf, NULL, 0);
