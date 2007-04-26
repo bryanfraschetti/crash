@@ -1,8 +1,8 @@
 /* main.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,6 +16,7 @@
  */
 
 #include "defs.h"
+#include "xen_hyper_defs.h"
 #include <curses.h>
 #include <getopt.h>
 
@@ -23,6 +24,7 @@ static void setup_environment(int, char **);
 static int is_external_command(void);
 static int is_builtin_command(void);
 static int is_input_file(void);
+static void check_xen_hyper(void);
 
 static struct option long_options[] = {
         {"memory_module", 1, 0, 0},
@@ -44,6 +46,9 @@ static struct option long_options[] = {
 	{"shadow_page_tables", 0, 0, 0},
         {"cpus", 1, 0, 0},
         {"no_ikconfig", 0, 0, 0},
+        {"hyper", 0, 0, 0},
+	{"p2m_mfn", 1, 0, 0},
+	{"zero_excluded", 0, 0, 0},
         {0, 0, 0, 0}
 };
 
@@ -141,6 +146,15 @@ main(int argc, char **argv)
 
 		        if (STREQ(long_options[option_index].name, "cpus")) 
 				kt->cpus_override = optarg;
+
+			if (STREQ(long_options[option_index].name, "hyper"))
+				pc->flags |= XEN_HYPER;
+
+		        if (STREQ(long_options[option_index].name, "p2m_mfn")) 
+				xen_kdump_p2m_mfn(optarg);
+
+		        if (STREQ(long_options[option_index].name, "zero_excluded")) 
+				*diskdump_flags |= ZERO_EXCLUDED;
 
 			break;
 
@@ -371,6 +385,8 @@ main(int argc, char **argv)
 		optind++;
 	}
 	
+	check_xen_hyper();
+
         if (setjmp(pc->main_loop_env))
                 clean_exit(1);
 
@@ -381,6 +397,7 @@ main(int argc, char **argv)
 	buf_init();
         cmdline_init();
         mem_init();
+       	hq_init();
 	machdep_init(PRE_SYMTAB);
         symtab_init();
 	machdep_init(PRE_GDB);
@@ -408,18 +425,28 @@ main_loop(void)
 {
         if (!(pc->flags & GDB_INIT)) {
 		gdb_session_init();
-		read_in_kernel_config(IKCFG_INIT);
-		kernel_init();
-		machdep_init(POST_GDB);
-        	vm_init();
-        	hq_init();
-        	module_init();
-        	help_init();
-        	task_init();
-        	vfs_init();
-		net_init();
-		dev_init();
-		machdep_init(POST_INIT);
+		if (XEN_HYPER_MODE()) {
+#ifdef XEN_HYPERVISOR_ARCH
+			machdep_init(POST_GDB);
+			xen_hyper_init();
+			machdep_init(POST_INIT);
+#else
+        		error(FATAL, XEN_HYPERVISOR_NOT_SUPPORTED);
+#endif
+		} else {
+			read_in_kernel_config(IKCFG_INIT);
+			kernel_init();
+			machdep_init(POST_GDB);
+        		vm_init();
+			machdep_init(POST_VM);
+        		module_init();
+        		help_init();
+        		task_init();
+        		vfs_init();
+			net_init();
+			dev_init();
+			machdep_init(POST_INIT);
+		}
 	} else
 		SIGACTION(SIGINT, restart, &pc->sigaction, NULL);
 
@@ -427,8 +454,17 @@ main_loop(void)
          *  Display system statistics and current context.
          */
         if (!(pc->flags & SILENT) && !(pc->flags & RUNTIME)) {
-                display_sys_stats();
-                show_context(CURRENT_CONTEXT());
+		if (XEN_HYPER_MODE()) {
+#ifdef XEN_HYPERVISOR_ARCH
+			xen_hyper_display_sys_stats();
+			xen_hyper_show_vcpu_context(XEN_HYPER_VCPU_LAST_CONTEXT());
+#else
+        		error(FATAL, XEN_HYPERVISOR_NOT_SUPPORTED);
+#endif
+		} else {
+			display_sys_stats();
+			show_context(CURRENT_CONTEXT());
+		}
                 fprintf(fp, "\n");
         }
 
@@ -474,8 +510,17 @@ reattempt:
 
 	if ((ct = get_command_table_entry(args[0]))) {
                 if (ct->flags & REFRESH_TASK_TABLE) {
-                        tt->refresh_task_table();
-			sort_context_array();
+			if (XEN_HYPER_MODE()) {
+#ifdef XEN_HYPERVISOR_ARCH
+				xen_hyper_refresh_domain_context_space();
+				xen_hyper_refresh_vcpu_context_space();
+#else
+        			error(FATAL, XEN_HYPERVISOR_NOT_SUPPORTED);
+#endif
+			} else {
+				tt->refresh_task_table();
+				sort_context_array();
+			}
 		}
                 if (!STREQ(pc->curcmd, pc->program_name))
                         pc->lastcmd = pc->curcmd;
@@ -522,7 +567,7 @@ get_command_table_entry(char *name)
         struct command_table_entry *cp;
         struct extension_table *ext;
   
-        for (cp = &base_command_table[0]; cp->name; cp++) {
+	for (cp = pc->cmd_table; cp->name; cp++) {
                 if (STREQ(cp->name, name))
                         return cp;
         }
@@ -678,7 +723,8 @@ setup_environment(int argc, char **argv)
 	machdep->verify_paddr = generic_verify_paddr;
 	pc->redhat_debug_loc = DEFAULT_REDHAT_DEBUG_LOCATION;
 	pc->cmdgencur = 0;
-	pc->cmdgenspec = ~pc->cmdgencur;
+	pc->cmd_table = linux_command_table;
+	kt->BUG_bytes = -1;
 
 	/*
 	 *  Get gdb version before initializing it since this might be one 
@@ -766,6 +812,8 @@ setup_environment(int argc, char **argv)
 
 	if (STREQ(pc->editing_mode, "no_mode"))
 		pc->editing_mode = "vi";
+
+	machdep_init(SETUP_ENV);
 }
 
 
@@ -936,6 +984,15 @@ dump_program_context(void)
         if (pc->flags & INIT_IFILE)
                 sprintf(&buf[strlen(buf)],
                         "%sINIT_IFILE", others++ ? "|" : "");
+        if (pc->flags & XEN_HYPER)
+                sprintf(&buf[strlen(buf)],
+                        "%sXEN_HYPER", others++ ? "|" : "");
+        if (pc->flags & XEN_CORE)
+                sprintf(&buf[strlen(buf)],
+                        "%sXEN_CORE", others++ ? "|" : "");
+        if (pc->flags & PLEASE_WAIT)
+                sprintf(&buf[strlen(buf)],
+                        "%sPLEASE_WAIT", others++ ? "|" : "");
 
 	if (pc->flags)
 		strcat(buf, ")");
@@ -1074,6 +1131,8 @@ dump_program_context(void)
 	fprintf(fp, "           tmp_fp: %lx\n", (ulong)pc->tmp_fp);
 	fprintf(fp, "         tmpfile2: %lx\n", (ulong)pc->tmpfile2);
 
+	fprintf(fp, "        cmd_table: %s\n", XEN_HYPER_MODE() ?
+		"xen_hyper_command_table" : "linux_command_table");
 	fprintf(fp, "           curcmd: %s\n", pc->curcmd);
 	fprintf(fp, "          lastcmd: %s\n", pc->lastcmd);
 	fprintf(fp, "      cur_gdb_cmd: %d  %s\n", pc->cur_gdb_cmd,
@@ -1082,7 +1141,6 @@ dump_program_context(void)
 		gdb_command_string(pc->last_gdb_cmd, buf, FALSE));
 	fprintf(fp, "          cur_req: %lx\n", (ulong)pc->cur_req);
 	fprintf(fp, "        cmdgencur: %ld\n", pc->cmdgencur); 
-	fprintf(fp, "       cmdgenspec: %ld\n", pc->cmdgenspec); 
 	fprintf(fp, "     curcmd_flags: %lx (", pc->curcmd_flags);
 	others = 0;
         if (pc->curcmd_flags & XEN_MACHINE_ADDR)
@@ -1093,7 +1151,18 @@ dump_program_context(void)
 		fprintf(fp, "%sIDLE_TASK_SHOWN", others ? "|" : "");
         if (pc->curcmd_flags & TASK_SPECIFIED)
 		fprintf(fp, "%sTASK_SPECIFIED", others ? "|" : "");
+        if (pc->curcmd_flags & MEMTYPE_UVADDR)
+		fprintf(fp, "%sMEMTYPE_UVADDR", others ? "|" : "");
+        if (pc->curcmd_flags & MEMTYPE_FILEADDR)
+		fprintf(fp, "%sMEMTYPE_FILEADDR", others ? "|" : "");
+        if (pc->curcmd_flags & HEADER_PRINTED)
+		fprintf(fp, "%sHEADER_PRINTED", others ? "|" : "");
+        if (pc->curcmd_flags & BAD_INSTRUCTION)
+		fprintf(fp, "%sBAD_INSTRUCTION", others ? "|" : "");
+        if (pc->curcmd_flags & UD2A_INSTRUCTION)
+		fprintf(fp, "%sUD2A_INSTRUCTION", others ? "|" : "");
 	fprintf(fp, ")\n");
+	fprintf(fp, "   curcmd_private: %llx\n", pc->curcmd_private); 
 	fprintf(fp, "       sigint_cnt: %d\n", pc->sigint_cnt);
 	fprintf(fp, "        sigaction: %lx\n", (ulong)&pc->sigaction);
 	fprintf(fp, "    gdb_sigaction: %lx\n", (ulong)&pc->gdb_sigaction);
@@ -1134,6 +1203,10 @@ dump_program_context(void)
 		fprintf(fp, "          readmem: read_kdump()\n");
 	else if (pc->readmem == read_memory_device)
 		fprintf(fp, "          readmem: read_memory_device()\n");
+	else if (pc->readmem == read_xendump_hyper)
+		fprintf(fp, "          readmem: read_xendump_hyper()\n");
+	else if (pc->readmem == read_diskdump)
+		fprintf(fp, "          readmem: read_diskdump()\n");
 	else
 		fprintf(fp, "          readmem: %lx\n", (ulong)pc->readmem);
         if (pc->writemem == write_dev_mem)
@@ -1152,6 +1225,8 @@ dump_program_context(void)
                 fprintf(fp, "         writemem: write_kdump()\n");
         else if (pc->writemem == write_memory_device)
                 fprintf(fp, "         writemem: write_memory_device()\n");
+        else if (pc->writemem == write_diskdump)
+                fprintf(fp, "         writemem: write_diskdump()\n");
         else
                 fprintf(fp, "         writemem: %lx\n", (ulong)pc->writemem);
 
@@ -1184,4 +1259,29 @@ clean_exit(int status)
 		cleanup_memory_driver();
 
 	exit(status);
+}
+
+/*
+ *  Check whether this session is for xen hypervisor analysis.
+ */
+static void
+check_xen_hyper(void)
+{
+	if (!pc->namelist)
+		return;
+
+	if (!XEN_HYPER_MODE()) {
+		if (STRNEQ(basename(pc->namelist), "xen-syms"))
+			pc->flags |= XEN_HYPER;
+		else
+			return;
+	}
+
+#ifdef XEN_HYPERVISOR_ARCH
+	pc->cmd_table = xen_hyper_command_table;
+	if (pc->flags & XENDUMP)
+		pc->readmem = read_xendump_hyper;
+#else
+	error(FATAL, XEN_HYPERVISOR_NOT_SUPPORTED);
+#endif
 }

@@ -1,8 +1,8 @@
 /* filesys.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,6 +43,7 @@ static int get_memory_driver_dev(dev_t *);
 static int memory_driver_init(void);
 static int create_memory_device(dev_t);
 static void *radix_tree_lookup(ulong, ulong, int);
+static int match_file_string(char *, char *, char *);
 
 #define DENTRY_CACHE (20)
 #define INODE_CACHE  (20)
@@ -99,6 +100,10 @@ fd_init(void)
 		}
 
 		if (pc->namelist) {
+			if (XEN_HYPER_MODE() && !pc->dumpfile)
+				error(FATAL, 
+				    "Xen hypervisor mode requires a dumpfile\n");
+
 			if (!pc->dumpfile && !get_proc_version())
 	                	error(INFO, "/proc/version: %s\n", 
 					strerror(errno));
@@ -225,10 +230,7 @@ memory_source_init(void)
 static void
 match_proc_version(void)
 {
-	char command[BUFSIZE];
 	char buffer[BUFSIZE];
-	FILE *pipe;
-	int found;
 
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
@@ -236,26 +238,7 @@ match_proc_version(void)
 	if (!strlen(kt->proc_version)) 
 		return;
 
-        sprintf(command, "/usr/bin/strings %s", pc->namelist);
-        if ((pipe = popen(command, "r")) == NULL) {
-                error(INFO, "%s: %s\n", pc->namelist, strerror(errno));
-                return;
-        }
-
-	found = FALSE;
-        while (fgets(buffer, BUFSIZE-1, pipe)) {
-		char* ptr;
-		ptr = strstr(buffer, "Linux version 2.");
-		if (!ptr)
-			continue;
-
-                if (STREQ(ptr, kt->proc_version)) 
-                	found = TRUE;
-		break;
-        }
-        pclose(pipe);
-
-	if (found) {
+	if (match_file_string(pc->namelist, kt->proc_version, buffer)) {
                 if (CRASHDEBUG(1)) {
 			fprintf(fp, "/proc/version:\n%s", kt->proc_version);
 			fprintf(fp, "%s:\n%s", pc->namelist, buffer);
@@ -505,13 +488,11 @@ static int
 find_booted_kernel(void)
 {
 	char kernel[BUFSIZE];
-	char command[BUFSIZE];
 	char buffer[BUFSIZE];
 	char **searchdirs;
 	int i, preferred, wrapped;
         DIR *dirp;
         struct dirent *dp;
-	FILE *pipe;
 	int found;
 
 	pc->flags |= FINDKERNEL;
@@ -560,24 +541,11 @@ find_booted_kernel(void)
                             !is_elf_file(kernel))
 				continue;
 
-			sprintf(command, "/usr/bin/strings %s", kernel);
-	        	if ((pipe = popen(command, "r")) == NULL) {
-	        		error(INFO, "%s: %s\n", 
-					kernel, strerror(errno));
-				continue;
-			}
-
 			if (CRASHDEBUG(1)) 
 				fprintf(fp, "find_booted_kernel: check: %s\n", 
 					kernel);
 
-			while (fgets(buffer, BUFSIZE-1, pipe)) {
-				if (STREQ(buffer, kt->proc_version)) {
-					found = TRUE;
-					break;
-				}
-			}
-			pclose(pipe);
+			found = match_file_string(kernel, kt->proc_version, buffer);
 	
 			if (found)
 				break;
@@ -819,30 +787,14 @@ find_booted_system_map(void)
 static int
 verify_utsname(char *system_map)
 {
-	char command[BUFSIZE];
 	char buffer[BUFSIZE];
-	FILE *pipe;
-	int found;
 	ulong value;
 	struct new_utsname new_utsname;
 
-	sprintf(command, "/usr/bin/strings %s", system_map);
-       	if ((pipe = popen(command, "r")) == NULL) 
-		return FALSE;
-	
 	if (CRASHDEBUG(1)) 
 		fprintf(fp, "verify_utsname: check: %s\n", system_map);
 
-	found = FALSE;
-	while (fgets(buffer, BUFSIZE-1, pipe)) {
-		if (strstr(buffer, "D system_utsname")) {
-			found = TRUE;
-			break;
-		}
-	}
-	pclose(pipe);
-
-	if (!found)
+	if (!match_file_string(system_map, "D system_utsname", buffer))
 		return FALSE;
 	
 	if (extract_hex(buffer, &value, NULLCHAR, TRUE) &&
@@ -1155,7 +1107,6 @@ cmd_mount(void)
         char *arglist[MAXARGS*2];
 	ulong vfsmount = 0;
 	int flags = 0;
-	int mh_flag = 1;
 	int save_next;
 
 	namespace_context = pid_to_context(1);
@@ -1231,9 +1182,9 @@ cmd_mount(void)
 						show_mounts(vfsmount, flags, 
 							namespace_context);
 					} else {
-						if (mh_flag) {
+						if (!(pc->curcmd_flags & HEADER_PRINTED)) {
 							fprintf(fp, mount_hdr);
-							mh_flag = 0;
+							pc->curcmd_flags |= HEADER_PRINTED;
 						}
 						fprintf(fp, buf2);
 					}
@@ -1456,7 +1407,7 @@ get_mount_list(int *cntptr, struct task_context *namespace_context)
 {
 	struct list_data list_data, *ld;
 	int mount_cnt;
-	ulong *mntlist, namespace, root;
+	ulong *mntlist, namespace, root, nsproxy, mnt_ns;
 	struct task_context *tc;
 	
         ld = &list_data;
@@ -1465,6 +1416,24 @@ get_mount_list(int *cntptr, struct task_context *namespace_context)
 	if (symbol_exists("vfsmntlist")) {
         	get_symbol_data("vfsmntlist", sizeof(void *), &ld->start);
                	ld->end = symbol_value("vfsmntlist");
+	} else if (VALID_MEMBER(task_struct_nsproxy)) {
+ 		tc = namespace_context;
+
+        	readmem(tc->task + OFFSET(task_struct_nsproxy), KVADDR, 
+			&nsproxy, sizeof(void *), "task nsproxy", 
+			FAULT_ON_ERROR);
+        	if (!readmem(nsproxy + OFFSET(nsproxy_mnt_ns), KVADDR, 
+			&mnt_ns, sizeof(void *), "nsproxy mnt_ns", 
+			RETURN_ON_ERROR|QUIET))
+			error(FATAL, "cannot determine mount list location!\n");
+        	if (!readmem(mnt_ns + OFFSET(mnt_namespace_root), KVADDR, 
+			&root, sizeof(void *), "mnt_namespace root", 
+			RETURN_ON_ERROR|QUIET))
+			error(FATAL, "cannot determine mount list location!\n");
+
+        	ld->start = root + OFFSET(vfsmount_mnt_list);
+        	ld->end = mnt_ns + OFFSET(mnt_namespace_list);
+
 	} else if (VALID_MEMBER(namespace_root)) {
  		tc = namespace_context;
 
@@ -1766,6 +1735,13 @@ vfs_init(void)
 	MEMBER_OFFSET_INIT(file_f_dentry, "file", "f_dentry");
 	MEMBER_OFFSET_INIT(file_f_vfsmnt, "file", "f_vfsmnt");
 	MEMBER_OFFSET_INIT(file_f_count, "file", "f_count");
+	if (INVALID_MEMBER(file_f_dentry)) {
+		MEMBER_OFFSET_INIT(file_f_path, "file", "f_path");
+		MEMBER_OFFSET_INIT(path_mnt, "path", "mnt");
+		MEMBER_OFFSET_INIT(path_dentry, "path", "dentry");
+		ASSIGN_OFFSET(file_f_dentry) = OFFSET(file_f_path) + OFFSET(path_dentry);
+		ASSIGN_OFFSET(file_f_vfsmnt) = OFFSET(file_f_path) + OFFSET(path_mnt);
+	}
 	MEMBER_OFFSET_INIT(dentry_d_inode, "dentry", "d_inode");
 	MEMBER_OFFSET_INIT(dentry_d_parent, "dentry", "d_parent");
 	MEMBER_OFFSET_INIT(dentry_d_covers, "dentry", "d_covers");
@@ -1787,10 +1763,15 @@ vfs_init(void)
         MEMBER_OFFSET_INIT(vfsmount_mnt_mountpoint, 
 		"vfsmount", "mnt_mountpoint");
 	MEMBER_OFFSET_INIT(namespace_root, "namespace", "root");
+	MEMBER_OFFSET_INIT(task_struct_nsproxy, "task_struct", "nsproxy");
 	if (VALID_MEMBER(namespace_root)) {
 		MEMBER_OFFSET_INIT(namespace_list, "namespace", "list");
 		MEMBER_OFFSET_INIT(task_struct_namespace, 
 			"task_struct", "namespace");
+	} else if (VALID_MEMBER(task_struct_nsproxy)) {
+		MEMBER_OFFSET_INIT(nsproxy_mnt_ns, "nsproxy", "mnt_ns");
+        	MEMBER_OFFSET_INIT(mnt_namespace_root, "mnt_namespace", "root");
+        	MEMBER_OFFSET_INIT(mnt_namespace_list, "mnt_namespace", "list");
 	} else if (THIS_KERNEL_VERSION >= LINUX(2,4,20)) {
 		if (CRASHDEBUG(2))
 			fprintf(fp, "hardwiring namespace stuff\n");
@@ -2183,8 +2164,11 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 		if (fdtable_addr) {
 			readmem(fdtable_addr, KVADDR, fdtable_buf,
 	 			SIZE(fdtable), "fdtable buffer", FAULT_ON_ERROR); 
-			max_fdset = INT(fdtable_buf +
-				OFFSET(fdtable_max_fdset));
+			if (VALID_MEMBER(fdtable_max_fdset))
+				max_fdset = INT(fdtable_buf +
+					OFFSET(fdtable_max_fdset));
+			else
+				max_fdset = -1;
 			max_fds = INT(fdtable_buf +
         	                OFFSET(fdtable_max_fds));
 		}
@@ -2258,7 +2242,8 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 	for (;;) {
 		unsigned long set;
 		i = j * __NFDBITS;
-		if (i >= max_fdset || i >= max_fds)
+		if (((max_fdset >= 0) && (i >= max_fdset)) || 
+		    (i >= max_fds))
 			 break;
 		set = open_fds.__fds_bits[j++];
 		while (set) {
@@ -3673,4 +3658,30 @@ is_readable(char *filename)
 		close(fd);
 
 	return TRUE;
+}
+
+static int
+match_file_string(char *filename, char *string, char *buffer)
+{
+	int found;
+	char command[BUFSIZE];
+	FILE *pipe;
+
+
+	sprintf(command, "/usr/bin/strings %s", filename);
+        if ((pipe = popen(command, "r")) == NULL) {
+                error(INFO, "%s: %s\n", filename, strerror(errno));
+                return FALSE;
+        }
+
+        found = FALSE;
+        while (fgets(buffer, BUFSIZE-1, pipe)) {
+                if (strstr(buffer, string)) {
+                        found = TRUE;
+                        break;
+                }
+        }
+        pclose(pipe);
+
+	return found;
 }

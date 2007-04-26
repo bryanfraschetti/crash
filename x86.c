@@ -1,8 +1,8 @@
 /* x86.c - core analysis suite
  *
  * Portions Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -51,6 +51,7 @@
  * rights to redistribute these changes.
  */
 #include "defs.h"
+#include "xen_hyper_defs.h"
 
 #ifndef MCLX
 
@@ -979,6 +980,7 @@ static int x86_translate_pte(ulong, void *, ulonglong);
 static uint64_t x86_memory_size(void);
 static ulong x86_vmalloc_start(void);
 static ulong *read_idt_table(int);
+static void eframe_init(void);
 #define READ_IDT_INIT     1
 #define READ_IDT_RUNTIME  2
 static char *extract_idt_function(ulong *, char *, ulong *);
@@ -1003,26 +1005,28 @@ static char *x86_xendump_load_page(ulong, char *);
 static char *x86_xendump_load_page_PAE(ulong, char *);
 static int x86_xendump_page_index(ulong);
 static int x86_xendump_page_index_PAE(ulong);
+static void x86_init_hyper(int);
+static ulong x86_get_stackbase_hyper(ulong);
+static ulong x86_get_stacktop_hyper(ulong);
 
+static int INT_EFRAME_SS = 14;
+static int INT_EFRAME_ESP = 13;
+static int INT_EFRAME_EFLAGS = 12;   /* CS lcall7 */
+static int INT_EFRAME_CS = 11;       /* EIP lcall7 */
+static int INT_EFRAME_EIP = 10;      /* EFLAGS lcall7 */
+static int INT_EFRAME_ERR = 9;
+static int INT_EFRAME_ES = 8;
+static int INT_EFRAME_DS = 7;
+static int INT_EFRAME_EAX = 6;
+static int INT_EFRAME_EBP = 5;
+static int INT_EFRAME_EDI = 4;
+static int INT_EFRAME_ESI = 3;
+static int INT_EFRAME_EDX = 2;
+static int INT_EFRAME_ECX = 1;
+static int INT_EFRAME_EBX = 0;
+static int INT_EFRAME_GS = -1;
 
-#define INT_EFRAME_SS      (14)
-#define INT_EFRAME_ESP     (13)
-#define INT_EFRAME_EFLAGS  (12)   /* CS lcall7 */
-#define INT_EFRAME_CS      (11)   /* EIP lcall7 */
-#define INT_EFRAME_EIP     (10)   /* EFLAGS lcall7 */
-#define INT_EFRAME_ERR     (9)    
-
-#define INT_EFRAME_ES      (8)
-#define INT_EFRAME_DS      (7)
-#define INT_EFRAME_EAX     (6)
-#define INT_EFRAME_EBP     (5)
-#define INT_EFRAME_EDI     (4)
-#define INT_EFRAME_ESI     (3)
-#define INT_EFRAME_EDX     (2)
-#define INT_EFRAME_ECX     (1)
-#define INT_EFRAME_EBX     (0)
-
-#define USER_EFRAME_SIZE   (INT_EFRAME_SS+1)
+#define MAX_USER_EFRAME_SIZE   (16)
 #define KERNEL_EFRAME_SIZE (INT_EFRAME_EFLAGS+1)
 
 #define EFRAME_USER   (1)
@@ -1035,7 +1039,7 @@ dump_eframe(struct eframe *ep, int frame_number, struct bt_info *bt)
 {
 	int i;
 	char buf[BUFSIZE], *sp;
-	ulong int_eframe[USER_EFRAME_SIZE];
+	ulong int_eframe[MAX_USER_EFRAME_SIZE];
 	int eframe_type, args;
 	ulong value, *argp;
 
@@ -1045,11 +1049,11 @@ dump_eframe(struct eframe *ep, int frame_number, struct bt_info *bt)
 		return(frame_number);
 
 	GET_STACK_DATA(ep->eframe_addr, (char *)int_eframe,
-		USER_EFRAME_SIZE * sizeof(ulong));	
+		SIZE(pt_regs));	
 
 	if (int_eframe[INT_EFRAME_CS] & DPL_BITS) {
 		if (!INSTACK(ep->eframe_addr + 
-		    (USER_EFRAME_SIZE*sizeof(ulong)) - 1, bt))
+		    SIZE(pt_regs) - 1, bt))
 			return(frame_number);
 	/* error(FATAL, "read of exception frame would go beyond stack\n"); */
 		eframe_type = EFRAME_USER;
@@ -1178,17 +1182,24 @@ x86_dump_eframe_common(struct bt_info *bt, ulong *int_eframe, int kernel)
                         int_eframe[INT_EFRAME_EDX]);
 
         fprintf(fp, 
-		"    DS:  %04x      ESI: %08lx  ES:  %04x      EDI: %08lx \n",
+		"    DS:  %04x      ESI: %08lx  ES:  %04x      EDI: %08lx",
                 (short)int_eframe[INT_EFRAME_DS],
                 int_eframe[INT_EFRAME_ESI],
                 (short)int_eframe[INT_EFRAME_ES],
                 int_eframe[INT_EFRAME_EDI]);
+	if (kernel && (INT_EFRAME_GS != -1))
+		fprintf(fp, "  GS:  %04x", (short)int_eframe[INT_EFRAME_GS]);
+	fprintf(fp, "\n");
 
-	if (!kernel)
-		fprintf(fp, "    SS:  %04x      ESP: %08lx  EBP: %08lx \n",
+	if (!kernel) {
+		fprintf(fp, "    SS:  %04x      ESP: %08lx  EBP: %08lx",
 			(short)int_eframe[INT_EFRAME_SS],
 			int_eframe[INT_EFRAME_ESP],
                         int_eframe[INT_EFRAME_EBP]);
+		if (INT_EFRAME_GS != -1)
+			fprintf(fp, "  GS:  %04x", (short)int_eframe[INT_EFRAME_GS]);
+		fprintf(fp, "\n");
+	}
 
 	fprintf(fp, 
 	    "    CS:  %04x      EIP: %08lx  ERR: %08lx  EFLAGS: %08lx \n",
@@ -1375,7 +1386,7 @@ try_closest:
  */
 
 struct x86_pt_regs {
-	ulong reg_value[USER_EFRAME_SIZE];
+	ulong reg_value[MAX_USER_EFRAME_SIZE];
 };
 
 /*
@@ -1673,6 +1684,11 @@ x86_init(int when)
 {
 	struct syment *sp, *spn;
 
+	if (XEN_HYPER_MODE()) {
+		x86_init_hyper(when);
+		return;
+	}
+
 	switch (when)
 	{
 	case PRE_SYMTAB:
@@ -1781,7 +1797,7 @@ x86_init(int when)
 				machdep->hz = 1000;
 		}
 
-		if (machdep->flags & PAE){
+		if (machdep->flags & PAE) {
 			machdep->section_size_bits = _SECTION_SIZE_BITS_PAE;
 			machdep->max_physmem_bits = _MAX_PHYSMEM_BITS_PAE;
 		} else {
@@ -1805,12 +1821,54 @@ x86_init(int when)
 				"cpu_user_regs", "eip");
 		}
 
+		eframe_init();
 		break;
 
 	case POST_INIT:
 		read_idt_table(READ_IDT_INIT); 
 		break;
 	}
+}
+
+/*
+ *  Account for addition of pt_regs.xgs field in 2.6.20+ kernels.
+ */
+static void
+eframe_init(void)
+{
+	if (INVALID_SIZE(pt_regs)) {
+		if (THIS_KERNEL_VERSION < LINUX(2,6,20))
+			ASSIGN_SIZE(pt_regs) = (MAX_USER_EFRAME_SIZE-1)*sizeof(ulong);
+		else {
+			ASSIGN_SIZE(pt_regs) = MAX_USER_EFRAME_SIZE*sizeof(ulong);
+			INT_EFRAME_SS = 15;
+			INT_EFRAME_ESP = 14;
+			INT_EFRAME_EFLAGS = 13;
+			INT_EFRAME_CS = 12;
+			INT_EFRAME_EIP = 11;
+			INT_EFRAME_ERR = 10;
+			INT_EFRAME_GS = 9;
+		}
+		return;
+	}
+
+	INT_EFRAME_SS = MEMBER_OFFSET("pt_regs", "xss") / 4; 
+	INT_EFRAME_ESP = MEMBER_OFFSET("pt_regs", "esp") / 4;
+	INT_EFRAME_EFLAGS = MEMBER_OFFSET("pt_regs", "eflags") / 4;
+	INT_EFRAME_CS = MEMBER_OFFSET("pt_regs", "xcs") / 4;
+	INT_EFRAME_EIP = MEMBER_OFFSET("pt_regs", "eip") / 4;
+	INT_EFRAME_ERR = MEMBER_OFFSET("pt_regs", "orig_eax") / 4;
+	if ((INT_EFRAME_GS = MEMBER_OFFSET("pt_regs", "xgs")) != -1)
+		INT_EFRAME_GS /= 4;
+	INT_EFRAME_ES = MEMBER_OFFSET("pt_regs", "xes") / 4;
+	INT_EFRAME_DS = MEMBER_OFFSET("pt_regs", "xds") / 4;
+	INT_EFRAME_EAX = MEMBER_OFFSET("pt_regs", "eax") / 4;
+	INT_EFRAME_EBP = MEMBER_OFFSET("pt_regs", "ebp") / 4;
+	INT_EFRAME_EDI = MEMBER_OFFSET("pt_regs", "edi") / 4;
+	INT_EFRAME_ESI = MEMBER_OFFSET("pt_regs", "esi") / 4;
+	INT_EFRAME_EDX = MEMBER_OFFSET("pt_regs", "edx") / 4;
+	INT_EFRAME_ECX = MEMBER_OFFSET("pt_regs", "ecx") / 4;
+	INT_EFRAME_EBX = MEMBER_OFFSET("pt_regs", "ebx") / 4;
 }
 
 /*
@@ -2454,7 +2512,7 @@ x86_uvtop_xen_wpt_PAE(struct task_context *tc, ulong vaddr, physaddr_t *paddr, i
 			MKSTR(&physpage)));
 
                 pseudo_physpage += (PAGEOFFSET(vaddr) |
-                        (page_table_entry & _PAGE_NX));
+                        (page_table_entry & (_PAGE_NX|machdep->pageoffset)));
 
                 fprintf(fp, " PAGE: %s\n\n",
                         mkstring(buf, VADDR_PRLEN, RJUST|LONGLONG_HEX,
@@ -2490,21 +2548,29 @@ x86_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbose)
 	if (!IS_KVADDR(kvaddr))
 		return FALSE;
 
-	if (!vt->vmalloc_start) {
-		*paddr = VTOP(kvaddr);
-		return TRUE;
-	}
-
-	if (!IS_VMALLOC_ADDR(kvaddr)) { 
-		*paddr = VTOP(kvaddr);
-		if (!verbose)
+	if (XEN_HYPER_MODE()) {
+		if (DIRECTMAP_VIRT_ADDR(kvaddr)) {
+			*paddr = kvaddr - DIRECTMAP_VIRT_START;
 			return TRUE;
+		}
+		pgd = (ulong *)symbol_value("idle_pg_table_l2");
+	} else {
+		if (!vt->vmalloc_start) {
+			*paddr = VTOP(kvaddr);
+			return TRUE;
+		}
+
+		if (!IS_VMALLOC_ADDR(kvaddr)) { 
+			*paddr = VTOP(kvaddr);
+			if (!verbose)
+				return TRUE;
+		}
+
+		if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES))
+			return (x86_kvtop_xen_wpt(tc, kvaddr, paddr, verbose));
+
+		pgd = (ulong *)vt->kernel_pgd[0];
 	}
-
-	if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES))
-		return (x86_kvtop_xen_wpt(tc, kvaddr, paddr, verbose));
-
-	pgd = (ulong *)vt->kernel_pgd[0];
 
 	if (verbose) 
 		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
@@ -2734,21 +2800,29 @@ x86_kvtop_PAE(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verb
 	if (!IS_KVADDR(kvaddr))
 		return FALSE;
 
-	if (!vt->vmalloc_start) {
-		*paddr = VTOP(kvaddr);
-		return TRUE;
-	}
-
-	if (!IS_VMALLOC_ADDR(kvaddr)) { 
-		*paddr = VTOP(kvaddr);
-		if (!verbose)
+	if (XEN_HYPER_MODE()) {
+		if (DIRECTMAP_VIRT_ADDR(kvaddr)) {
+			*paddr = kvaddr - DIRECTMAP_VIRT_START;
 			return TRUE;
+		}
+		pgd = (ulonglong *)symbol_value("idle_pg_table_l3");
+	} else {
+		if (!vt->vmalloc_start) {
+			*paddr = VTOP(kvaddr);
+			return TRUE;
+		}
+
+		if (!IS_VMALLOC_ADDR(kvaddr)) { 
+			*paddr = VTOP(kvaddr);
+			if (!verbose)
+				return TRUE;
+		}
+
+	        if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES))
+	       	        return (x86_kvtop_xen_wpt_PAE(tc, kvaddr, paddr, verbose));
+
+		pgd = (ulonglong *)vt->kernel_pgd[0];
 	}
-
-        if (XEN() && (kt->xen_flags & WRITABLE_PAGE_TABLES))
-                return (x86_kvtop_xen_wpt_PAE(tc, kvaddr, paddr, verbose));
-
-	pgd = (ulonglong *)vt->kernel_pgd[0];
 
 	if (verbose) 
 		fprintf(fp, "PAGE DIRECTORY: %lx\n", (ulong)pgd);
@@ -3686,7 +3760,11 @@ x86_dis_filter(ulong vaddr, char *inbuf)
                             !strstr(buf2, "+"))
                                 sprintf(p1, buf1);
 		}
-	}
+	} 
+	else if (STREQ(argv[2], "ud2a"))
+		pc->curcmd_flags |= UD2A_INSTRUCTION;
+	else if (STREQ(argv[2], "(bad)"))
+		pc->curcmd_flags |= BAD_INSTRUCTION;
 
 	if (CRASHDEBUG(1))
 		console("    %s", inbuf);
@@ -4089,6 +4167,12 @@ x86_xen_kdump_p2m_create(struct xen_kdump_data *xkd)
 		frames -= mfns[i];
 	}
 
+        if (CRASHDEBUG(2)) {
+                for (i = 0; i < xkd->p2m_frames; i++)
+                        fprintf(fp, "%lx ", xkd->p2m_mfn_frame_list[i]);
+                fprintf(fp, "\n");
+        }
+
 	pc->readmem = read_kdump;
 	return TRUE;
 
@@ -4342,6 +4426,11 @@ x86_xendump_p2m_create(struct xendump_data *xd)
 	ulonglong *ulp;
 	off_t offset; 
 
+        if (!symbol_exists("phys_to_machine_mapping")) {
+                xd->flags |= XC_CORE_NO_P2M;
+                return TRUE;
+        }
+
 	if ((ctrlreg_offset = MEMBER_OFFSET("vcpu_guest_context", "ctrlreg")) ==
 	     INVALID_OFFSET)
 		error(FATAL, 
@@ -4361,11 +4450,14 @@ x86_xendump_p2m_create(struct xendump_data *xd)
 	    sizeof(ctrlreg))
 		error(FATAL, "cannot read vcpu_guest_context ctrlreg[8]\n");
 
-	for (i = 0; CRASHDEBUG(1) && (i < 8); i++) {
-		fprintf(xd->ofp, "ctrlreg[%d]: %lx\n", i, ctrlreg[i]);
-	}
+	mfn = (ctrlreg[3] >> PAGESHIFT()) | (ctrlreg[3] << (BITS()-PAGESHIFT()));
 
-	mfn = ctrlreg[3] >> PAGESHIFT();
+	for (i = 0; CRASHDEBUG(1) && (i < 8); i++) {
+		fprintf(xd->ofp, "ctrlreg[%d]: %lx", i, ctrlreg[i]);
+		if (i == 3)
+			fprintf(xd->ofp, " -> mfn: %lx", mfn);
+		fprintf(xd->ofp, "\n");
+	}
 
 	if (!xc_core_mfn_to_page(mfn, machdep->pgd))
 		error(FATAL, "cannot read/find cr3 page\n");
@@ -4674,4 +4766,195 @@ x86_get_xendump_regs(struct xendump_data *xd, struct bt_info *bt, ulong *eip, ul
 generic:
 	return machdep->get_stack_frame(bt, eip, esp);
 }
+
+/* for Xen Hypervisor analysis */
+
+static int
+x86_xenhyper_is_kvaddr(ulong addr)
+{
+	if (machdep->flags & PAE) {
+		return (addr >= HYPERVISOR_VIRT_START_PAE);
+	}
+	return (addr >= HYPERVISOR_VIRT_START);
+}
+
+static ulong
+x86_get_stackbase_hyper(ulong task)
+{
+	struct xen_hyper_vcpu_context *vcc;
+	int pcpu;
+	ulong init_tss;
+	ulong esp, base;
+	char *buf;
+
+	/* task means vcpu here */
+	vcc = xen_hyper_vcpu_to_vcpu_context(task);
+	if (!vcc)
+		error(FATAL, "invalid vcpu\n");
+
+	pcpu = vcc->processor;
+	if (!xen_hyper_test_pcpu_id(pcpu)) {
+		error(FATAL, "invalid pcpu number\n");
+	}
+	init_tss = symbol_value("init_tss");
+	buf = GETBUF(XEN_HYPER_SIZE(tss_struct));
+	init_tss += XEN_HYPER_SIZE(tss_struct) * pcpu;
+	if (!readmem(init_tss, KVADDR, buf,
+			XEN_HYPER_SIZE(tss_struct), "init_tss", RETURN_ON_ERROR)) {
+		error(FATAL, "cannot read init_tss.\n");
+	}
+	esp = ULONG(buf + XEN_HYPER_OFFSET(tss_struct_esp0));
+	FREEBUF(buf);
+	base = esp & (~(STACKSIZE() - 1));
+
+	return base;
+}
+
+static ulong
+x86_get_stacktop_hyper(ulong task)
+{
+	return x86_get_stackbase_hyper(task) + STACKSIZE();
+}
+
+static void
+x86_get_stack_frame_hyper(struct bt_info *bt, ulong *pcp, ulong *spp)
+{
+	struct xen_hyper_vcpu_context *vcc;
+	int pcpu;
+	ulong *regs;
+	ulong esp, eip;
+
+	/* task means vcpu here */
+	vcc = xen_hyper_vcpu_to_vcpu_context(bt->task);
+	if (!vcc)
+		error(FATAL, "invalid vcpu\n");
+
+	pcpu = vcc->processor;
+	if (!xen_hyper_test_pcpu_id(pcpu)) {
+		error(FATAL, "invalid pcpu number\n");
+	}
+
+	if (bt->flags & BT_TEXT_SYMBOLS_ALL) {
+		if (spp)
+			*spp = x86_get_stackbase_hyper(bt->task);
+		if (pcp)
+			*pcp = 0;
+		bt->flags &= ~BT_TEXT_SYMBOLS_ALL;
+		return;
+	}
+
+	regs = (ulong *)xen_hyper_id_to_dumpinfo_context(pcpu)->pr_reg_ptr;
+	esp = XEN_HYPER_X86_NOTE_ESP(regs);
+	eip = XEN_HYPER_X86_NOTE_EIP(regs);
+
+	if (spp) {
+		if (esp < x86_get_stackbase_hyper(bt->task) ||
+			esp >= x86_get_stacktop_hyper(bt->task))
+			*spp = x86_get_stackbase_hyper(bt->task);
+		else
+			*spp = esp;
+	}
+	if (pcp) {
+		if (is_kernel_text(eip))
+			*pcp = eip;
+		else
+			*pcp = 0;
+	}
+}
+
+static void
+x86_init_hyper(int when)
+{
+	switch (when)
+	{
+	case PRE_SYMTAB:
+		machdep->verify_symbol = x86_verify_symbol;
+                if (pc->flags & KERNEL_DEBUG_QUERY)
+                        return;
+                machdep->pagesize = memory_page_size();
+                machdep->pageshift = ffs(machdep->pagesize) - 1;
+                machdep->pageoffset = machdep->pagesize - 1;
+                machdep->pagemask = ~((ulonglong)machdep->pageoffset);
+		machdep->stacksize = machdep->pagesize * 4; /* ODA: magic num */
+        	if ((machdep->pgd = (char *)malloc(PAGESIZE())) == NULL)
+                	error(FATAL, "cannot malloc pgd space.");
+                if ((machdep->pmd = (char *)malloc(PAGESIZE())) == NULL)
+                        error(FATAL, "cannot malloc pmd space.");
+        	if ((machdep->ptbl = (char *)malloc(PAGESIZE())) == NULL)
+                	error(FATAL, "cannot malloc ptbl space.");
+		machdep->last_pgd_read = 0;
+		machdep->last_pmd_read = 0;
+		machdep->last_ptbl_read = 0;
+		machdep->machspec = &x86_machine_specific; /* some members used */
+		break;
+
+	case PRE_GDB:
+		if (symbol_exists("idle_pg_table_l3")) {
+                	machdep->flags |= PAE;
+			PGDIR_SHIFT = PGDIR_SHIFT_3LEVEL;
+			PTRS_PER_PTE = PTRS_PER_PTE_3LEVEL;
+			PTRS_PER_PGD = PTRS_PER_PGD_3LEVEL;
+                        machdep->kvtop = x86_kvtop_PAE;
+			machdep->kvbase = HYPERVISOR_VIRT_START_PAE;
+		} else {
+			PGDIR_SHIFT = PGDIR_SHIFT_2LEVEL;
+                        PTRS_PER_PTE = PTRS_PER_PTE_2LEVEL;
+                        PTRS_PER_PGD = PTRS_PER_PGD_2LEVEL;
+                	machdep->kvtop = x86_kvtop;
+			free(machdep->pmd);
+			machdep->pmd = machdep->pgd;   
+			machdep->kvbase = HYPERVISOR_VIRT_START;
+		}
+		machdep->ptrs_per_pgd = PTRS_PER_PGD;
+		machdep->identity_map_base = DIRECTMAP_VIRT_START;
+                machdep->is_kvaddr = x86_xenhyper_is_kvaddr;
+	        machdep->eframe_search = x86_eframe_search;
+	        machdep->back_trace = x86_back_trace_cmd;
+	        machdep->processor_speed = x86_processor_speed;		/* ODA: check */
+		machdep->dump_irq = generic_dump_irq; 			/* ODA: check */
+		machdep->get_stack_frame = x86_get_stack_frame_hyper;
+		machdep->get_stackbase = x86_get_stackbase_hyper;
+		machdep->get_stacktop = x86_get_stacktop_hyper;
+		machdep->translate_pte = x86_translate_pte;
+		machdep->memory_size = xen_hyper_x86_memory_size;
+		machdep->dis_filter = x86_dis_filter;
+//		machdep->cmd_mach = x86_cmd_mach;			/* ODA: check */
+		machdep->get_smp_cpus = xen_hyper_x86_get_smp_cpus;
+//		machdep->line_number_hooks = x86_line_number_hooks;	/* ODA: check */
+		machdep->flags |= FRAMESIZE_DEBUG;			/* ODA: check */
+		machdep->value_to_symbol = generic_machdep_value_to_symbol;
+		machdep->clear_machdep_cache = x86_clear_machdep_cache;
+
+		/* machdep table for Xen Hypervisor */
+		xhmachdep->pcpu_init = xen_hyper_x86_pcpu_init;
+		break;
+
+	case POST_GDB:
+#if 0	/* ODA: need this ? */
+		if (x86_omit_frame_pointer()) {
+			machdep->flags |= OMIT_FRAME_PTR;
+#endif
+		XEN_HYPER_STRUCT_SIZE_INIT(cpu_time, "cpu_time");
+		XEN_HYPER_STRUCT_SIZE_INIT(cpuinfo_x86, "cpuinfo_x86");
+		XEN_HYPER_STRUCT_SIZE_INIT(tss_struct, "tss_struct");
+		XEN_HYPER_MEMBER_OFFSET_INIT(tss_struct_esp0, "tss_struct", "esp0");
+		XEN_HYPER_MEMBER_OFFSET_INIT(cpu_time_local_tsc_stamp, "cpu_time", "local_tsc_stamp");
+		XEN_HYPER_MEMBER_OFFSET_INIT(cpu_time_stime_local_stamp, "cpu_time", "stime_local_stamp");
+		XEN_HYPER_MEMBER_OFFSET_INIT(cpu_time_stime_master_stamp, "cpu_time", "stime_master_stamp");
+		XEN_HYPER_MEMBER_OFFSET_INIT(cpu_time_tsc_scale, "cpu_time", "tsc_scale");
+		XEN_HYPER_MEMBER_OFFSET_INIT(cpu_time_calibration_timer, "cpu_time", "calibration_timer");
+		if (symbol_exists("cpu_data")) {
+			xht->cpu_data_address = symbol_value("cpu_data");
+		}
+/* KAK Can this be calculated? */
+		if (!machdep->hz) {
+			machdep->hz = XEN_HYPER_HZ;
+		}
+		break;
+
+	case POST_INIT:
+		break;
+	}
+}
+
 #endif /* X86 */

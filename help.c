@@ -1,8 +1,8 @@
 /* help.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,7 +19,6 @@
 
 static void reshuffle_cmdlist(void);
 static int sort_command_name(const void *, const void *);
-static void display_help_screen(char *);
 static void display_commands(void);
 static void display_copying_info(void);
 static void display_warranty_info(void);
@@ -147,7 +146,7 @@ help_init(void)
         struct command_table_entry *cp;
 	struct extension_table *ext;
 
-	for (pc->ncmds = 0, cp = &base_command_table[0]; cp->name; cp++) {
+	for (pc->ncmds = 0, cp = pc->cmd_table; cp->name; cp++) {
 		if (!(cp->flags & HIDDEN_COMMAND))
                 	pc->ncmds++;
 	}
@@ -188,7 +187,7 @@ reshuffle_cmdlist(void)
 	for (i = 0; i < pc->cmdlistsz; i++) 
 		pc->cmdlist[i] = NULL;
 
-        for (cnt = 0, cp = &base_command_table[0]; cp->name; cp++) {
+        for (cnt = 0, cp = pc->cmd_table; cp->name; cp++) {
 		if (!(cp->flags & HIDDEN_COMMAND))
                 	pc->cmdlist[cnt++] = cp->name;
 	}
@@ -403,7 +402,7 @@ cmd_help(void)
  *  Format and display the help menu.
  */
 
-static void
+void
 display_help_screen(char *indent)
 {
         int i, j, rows;
@@ -670,6 +669,8 @@ char *help_set[] = {
 "            edit  vi | emacs   set line editing mode (from .%src file only).",
 "        namelist  filename     name of kernel (from .%src file only).",
 "        dumpfile  filename     name of core dumpfile (from .%src file only).",
+"   zero_excluded  on | off     controls whether excluded pages from a dumpfile",
+"                               should return zero-filled memory.",
 " ",
 "  Internal variables may be set in four manners:\n",
 "    1. entering the set command in $HOME/.%src.",
@@ -715,6 +716,7 @@ char *help_set[] = {
 "              edit: vi",
 "          namelist: vmlinux",
 "          dumpfile: vmcore",
+"     zero_excluded: off",
 " ",
 "  Show the current context:\n",
 "    %s> set",
@@ -1090,7 +1092,7 @@ NULL
 char *help_rd[] = {
 "rd",
 "read memory",
-"[-dDsupxm][-8|-16|-32|-64][-o offs][-e addr] [address|symbol] [count]",
+"[-dDsupxmf][-8|-16|-32|-64][-o offs][-e addr] [address|symbol] [count]",
 "  This command displays the contents of memory, with the output formatted",
 "  in several different manners.  The starting address may be entered either",
 "  symbolically or by address.  The default output size is the size of a long",
@@ -1100,6 +1102,7 @@ char *help_rd[] = {
 "       -u  address argument is a user virtual address; only required on",
 "           processors with common user and kernel virtual address spaces.",
 "       -m  address argument is a xen host machine address.",
+"       -f  address argument is a dumpfile offset.",
 "       -d  display output in signed decimal format (default is hexadecimal).",
 "       -D  display output in unsigned decimal format (default is hexadecimal).",
 "       -s  displays output symbolically when appropriate.",
@@ -1119,7 +1122,8 @@ char *help_rd[] = {
 "             3. -u specifies a user virtual address, but is only necessary on",
 "                processors with common user and kernel virtual address spaces.",
 "   symbol  symbol of starting address to read.",
-"    count  number of memory locations to display (default is 1).",
+"    count  number of memory locations to display (default is 1); if entered,",
+"           must be the last argument on the command line.",
 "\nEXAMPLES",
 "  Display the kernel_version string:\n",
 "    %s> rd kernel_version 4 ",
@@ -1227,7 +1231,7 @@ char *help_bt[] = {
 "           fails or the -t option starts too high in the process stack).",
 "       -l  show file and line number of each stack trace text location.",
 "       -e  search the stack for possible kernel and user mode exception frames.",
-"       -E  search the IRQ stacks (x86, x86_64 and PPC64), and the exception",
+"       -E  search the IRQ stacks (x86, x86_64 and ppc64), and the exception",
 "           stacks (x86_64) for possible exception frames; all other arguments",
 "           will be ignored since this is not a context-sensitive operation.",
 "       -f  display all stack data contained in a frame; this option can be",
@@ -3043,8 +3047,8 @@ NULL
 char *help_struct[] = {
 "struct",
 "structure contents",
-"struct_name[.member] [[-o][-l offset][-r] [address | symbol] [count]]\n"
-"                              [-c count]",
+"struct_name[.member[,member]][-o][-l offset][-rfu] [address | symbol]\n"
+"                                       [count | -c count]",
 "  This command displays either a structure definition, or a formatted display",
 "  of the contents of a structure at a specified address.  When no address is",
 "  specified, the structure definition is shown along with the structure size.",
@@ -3052,7 +3056,8 @@ char *help_struct[] = {
 "  the scope of the data displayed to that particular member; when no address",
 "  is specified, the member's offset and definition are shown.\n",
 "    struct_name  name of a C-code structure used by the kernel.",
-"        .member  name of a structure member.",
+"        .member  name of a structure member; to display multiple members of a",
+"                 structure, use a comma-separated list of members.",
 "             -o  show member offsets when displaying structure definitions.",
 "      -l offset  if the address argument is a pointer to a list_head structure",
 "                 that is embedded in the target data structure, the offset",
@@ -3061,6 +3066,9 @@ char *help_struct[] = {
 "                   1. in \"structure.member\" format.",
 "                   2. a number of bytes. ",
 "             -r  raw dump of structure data.",
+"             -f  address argument is a dumpfile offset.",
+"             -u  address argument is a user virtual address in the current",
+"                 context.",
 "        address  hexadecimal address of a structure; if the address points",  
 "                 to an embedded list_head structure contained within the",
 "                 target data structure, then the \"-l\" option must be used.",
@@ -3151,6 +3159,21 @@ char *help_struct[] = {
 "    struct mm_struct {",
 "       [12] pgd_t *pgd;",
 "    }\n",
+"  Display the flags and virtual members of 4 contigous page structures",
+"  in the mem_map page structure array:\n",
+"    %s> page.flags,virtual c101196c 4",
+"      flags = 0x8000,",
+"      virtual = 0xc04b0000",
+"    ",
+"      flags = 0x8000,",
+"      virtual = 0xc04b1000",
+"    ",
+"      flags = 0x8000,",
+"      virtual = 0xc04b2000",
+"    ",
+"      flags = 0x8000,",
+"      virtual = 0xc04b3000",
+" ",
 "  Display the array of tcp_sl_timer structures declared by tcp_slt_array[]:\n",
 "    %s> struct tcp_sl_timer tcp_slt_array 4",
 "    struct tcp_sl_timer {",
@@ -3259,8 +3282,8 @@ NULL
 char *help_union[] = {
 "union",
 "union contents",
-"union_name[.member] [[-o][-l offset][-r] [address | symbol] [count]]\n"
-"                            [-c count]",
+"union_name[.member[,member]] [-o][-l offset][-rfu] [address | symbol]\n"
+"                                     [count | -c count]",
 "  This command displays either a union definition, or a formatted display",
 "  of the contents of a union at a specified address.  When no address is",
 "  specified, the union definition is shown along with the union size.",
@@ -3268,7 +3291,8 @@ char *help_union[] = {
 "  the scope of the data displayed to that particular member; when no address",
 "  is specified, the member's offset (always 0) and definition are shown.\n",
 "     union_name  name of a C-code union used by the kernel.",
-"        .member  name of a union member.",  
+"        .member  name of a union member; to display multiple members of a",
+"                 union, use a comma-separated list of members.",
 "             -o  show member offsets when displaying union definitions.",
 "                 (always 0)",
 "      -l offset  if the address argument is a pointer to a list_head structure",
@@ -3278,6 +3302,9 @@ char *help_union[] = {
 "                   1. in \"structure.member\" format.",
 "                   2. a number of bytes. ",
 "             -r  raw dump of union data.",
+"             -f  address argument is a dumpfile offset.",
+"             -u  address argument is a user virtual address in the current",
+"                 context.",
 "        address  hexadecimal address of a union; if the address points",
 "                 to an embedded list_head structure contained within the",
 "                 target union structure, then the \"-l\" option must be used.",
@@ -3359,7 +3386,7 @@ NULL
 char *help_mod[] = {
 "mod",
 "module information and loading of symbols and debugging data",
-"[ -s module [objfile] | -d module | -S [directory] | -D | -r ] ",
+"[ -s module [objfile] | -d module | -S [directory] | -D | -r | -o ] ",
 "  With no arguments, this command displays basic information of the currently",
 "  installed modules, consisting of the module address, name, size, the",
 "  object file name (if known), and whether the module was compiled with",
@@ -3410,6 +3437,7 @@ char *help_mod[] = {
 "                   -r  Reinitialize module data. All currently-loaded symbolic",
 "                       and debugging data will be deleted, and the installed",
 "                       module list will be updated (live system only).",
+"                   -o  Load module symbols with old mechanism.",
 " ",
 "  After symbolic and debugging data have been loaded, backtraces and text",
 "  disassembly will be displayed appropriately.  Depending upon the processor",
@@ -4243,18 +4271,21 @@ NULL
 char *help_dis[] = {
 "dis",
 "disassemble",
-"[-r][-l][-u] [address | symbol | (expression)] [count]",
+"[-r][-l][-u][-b [num]] [address | symbol | (expression)] [count]",
 "  This command disassembles source code instructions starting (or ending) at",
 "  a text address that may be expressed by value, symbol or expression:\n",
 "            -r  (reverse) displays all instructions from the start of the ",
 "                routine up to and including the designated address.",
 "            -l  displays source code line number data in addition to the ",
 "                disassembly output.", 
-"            -u  address is a user virtual address; otherwise the address is ",
-"                assumed to be a kernel virtual address.  If this option is",
-"                used, then -r and -l are ignored.",
+"            -u  address is a user virtual address in the current context;",
+"                otherwise the address is assumed to be a kernel virtual address.",
+"                If this option is used, then -r and -l are ignored.",
+"      -b [num]  modify the pre-calculated number of encoded bytes to skip after",
+"                a kernel BUG (\"ud2a\") instruction; with no argument, displays",  
+"                the current number of bytes being skipped. (x86 and x86_64 only)",
 "       address  starting hexadecimal text address.",
-"        symbol  symbol of starting text address.  On PPC64, the symbol",
+"        symbol  symbol of starting text address.  On ppc64, the symbol",
 "                preceded by '.' is used.",
 "  (expression)  expression evaluating to a starting text address.",
 "         count  the number of instructions to be disassembled (default is 1).",
@@ -5077,7 +5108,9 @@ char *output_info[] = {
 "The default output radix for gdb output and certain %s commands is",
 "hexadecimal.  This can be changed to decimal by entering \"set radix 10\"",
 "or the alias \"dec\".  It can be reverted back to hexadecimal by entering",
-"\"set radix 16\" or the alias \"hex\".",
+"\"set radix 16\" or the alias \"hex\".\n",
+"To execute an external shell command, precede the command with an \"!\".",
+"To escape to a shell, enter \"!\" alone.",
 " ",
 NULL
 };
@@ -5119,10 +5152,11 @@ display_version(void)
 static 
 char *version_info[] = {
 
-"Copyright (C) 2002, 2003, 2004, 2005, 2006  Red Hat, Inc.",
+"Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007  Red Hat, Inc.",
 "Copyright (C) 2004, 2005, 2006  IBM Corporation", 
 "Copyright (C) 1999-2006  Hewlett-Packard Co",
-"Copyright (C) 2005  Fujitsu Limited",
+"Copyright (C) 2005, 2006  Fujitsu Limited",
+"Copyright (C) 2006, 2007  VA Linux Systems Japan K.K.",
 "Copyright (C) 2005  NEC Corporation",
 "Copyright (C) 1999, 2002  Silicon Graphics, Inc.",
 "Copyright (C) 1999, 2000, 2001, 2002  Mission Critical Linux, Inc.",

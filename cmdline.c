@@ -1,8 +1,8 @@
 /* cmdline.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -921,14 +921,20 @@ restore_sanity(void)
 
 	wait_for_children(ZOMBIES_ONLY);
 
-	pc->flags &= ~(INIT_IFILE|RUNTIME_IFILE|_SIGINT_);
+	pc->flags &= ~(INIT_IFILE|RUNTIME_IFILE|_SIGINT_|PLEASE_WAIT);
 	pc->sigint_cnt = 0;
 	pc->redirect = 0;
 	pc->pipe_command[0] = NULLCHAR;
 	pc->pipe_pid = 0;
 	pc->pipe_shell_pid = 0;
 	pc->sbrk = sbrk(0);
+	if ((pc->curcmd_flags & (UD2A_INSTRUCTION|BAD_INSTRUCTION)) ==
+		(UD2A_INSTRUCTION|BAD_INSTRUCTION))
+		error(WARNING, "A (bad) instruction was noted in last disassembly.\n"
+                     "         Use \"dis -b [number]\" to set/restore the number of\n"
+                     "         encoded bytes to skip after a ud2a (BUG) instruction.\n");
 	pc->curcmd_flags = 0;
+	pc->curcmd_private = 0;
 
 	restore_gdb_sanity();
 
