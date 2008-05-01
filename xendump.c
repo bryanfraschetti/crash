@@ -1,8 +1,8 @@
 /* 
  * xendump.c 
  * 
- * Copyright (C) 2006, 2007 David Anderson
- * Copyright (C) 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This software may be freely redistributed under the terms of the
  * GNU General Public License.
@@ -19,7 +19,7 @@ static struct xendump_data xendump_data = { 0 };
 static struct xendump_data *xd = &xendump_data;
 
 static int xc_save_verify(char *);
-static int xc_core_verify(char *);
+static int xc_core_verify(char *, char *);
 static int xc_save_read(void *, int, ulong, physaddr_t);
 static int xc_core_read(void *, int, ulong, physaddr_t);
 static int xc_core_mfns(ulong, FILE *);
@@ -35,7 +35,7 @@ static int xc_core_pfn_valid(ulong);
 
 static void xendump_print(char *fmt, ...);
 
-static int xc_core_elf_verify(char *);
+static int xc_core_elf_verify(char *, char *);
 static void xc_core_elf_dump(void);
 static char *xc_core_elf_mfn_to_page(ulong, char *);
 static int xc_core_elf_mfn_to_page_index(ulong);
@@ -80,7 +80,7 @@ is_xendump(char *file)
 	else 
                 xd->page_size = machdep->pagesize;
 
-	verified = xc_save_verify(buf) || xc_core_verify(buf);
+	verified = xc_save_verify(buf) || xc_core_verify(file, buf);
 
 	if (!verified)
 		close(xd->xfd);
@@ -93,13 +93,13 @@ is_xendump(char *file)
  *  library function in libxc/xc_core.c.
  */
 static int
-xc_core_verify(char *buf)
+xc_core_verify(char *file, char *buf)
 {
 	struct xc_core_header *xcp;
 
 	xcp = (struct xc_core_header *)buf;
 
-	if (xc_core_elf_verify(buf))
+	if (xc_core_elf_verify(file, buf))
 		return TRUE;
 
 	if ((xcp->xch_magic != XC_CORE_MAGIC) && 
@@ -1272,6 +1272,7 @@ xc_core_mfn_to_page(ulong mfn, char *pgbuf)
 	int i, b, idx, done;
 	ulong tmp[MAX_BATCH_SIZE];
 	off_t offset;
+	size_t size;
 	uint nr_pages;
 
 	if (xd->flags & XC_CORE_ELF)
@@ -1289,9 +1290,8 @@ xc_core_mfn_to_page(ulong mfn, char *pgbuf)
 
         for (b = 0, idx = -1, done = FALSE; 
 	     !done && (b < nr_pages); b += MAX_BATCH_SIZE) {
-
-                if (read(xd->xfd, tmp, sizeof(ulong) * MAX_BATCH_SIZE) != 
-		    (MAX_BATCH_SIZE * sizeof(ulong))) {
+		size = sizeof(ulong) * MIN(MAX_BATCH_SIZE, nr_pages - b);
+                if (read(xd->xfd, tmp, size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return NULL;
 		}
@@ -1354,7 +1354,6 @@ xc_core_elf_mfn_to_page(ulong mfn, char *pgbuf)
 	struct xen_dumpcore_p2m p2m_batch[MAX_BATCH_SIZE];
 
         offset = xd->xc_core.header.xch_index_offset;
-	size = sizeof(struct xen_dumpcore_p2m) * MAX_BATCH_SIZE;
 	nr_pages = xd->xc_core.header.xch_nr_pages;
 
         if (lseek(xd->xfd, offset, SEEK_SET) == -1)
@@ -1362,7 +1361,8 @@ xc_core_elf_mfn_to_page(ulong mfn, char *pgbuf)
 
         for (b = 0, idx = -1, done = FALSE; 
 	     !done && (b < nr_pages); b += MAX_BATCH_SIZE) {
-
+		size = sizeof(struct xen_dumpcore_p2m) *
+			MIN(MAX_BATCH_SIZE, nr_pages - b);
                 if (read(xd->xfd, &p2m_batch[0], size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return NULL;
@@ -1422,6 +1422,7 @@ xc_core_mfn_to_page_index(ulong mfn)
         int i, b;
         ulong tmp[MAX_BATCH_SIZE];
 	uint nr_pages;
+	size_t size;
 
 	if (xd->flags & XC_CORE_ELF)
 		return xc_core_elf_mfn_to_page_index(mfn);
@@ -1437,9 +1438,8 @@ xc_core_mfn_to_page_index(ulong mfn)
                 nr_pages *= 2;
 
         for (b = 0; b < nr_pages; b += MAX_BATCH_SIZE) {
-
-                if (read(xd->xfd, tmp, sizeof(ulong) * MAX_BATCH_SIZE) != 
-		    (MAX_BATCH_SIZE * sizeof(ulong))) {
+		size = sizeof(ulong) * MIN(MAX_BATCH_SIZE, nr_pages - b);
+                if (read(xd->xfd, tmp, size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return MFN_NOT_FOUND;
 		}
@@ -1475,14 +1475,14 @@ xc_core_elf_mfn_to_page_index(ulong mfn)
         struct xen_dumpcore_p2m p2m_batch[MAX_BATCH_SIZE];
 
         offset = xd->xc_core.header.xch_index_offset;
-        size = sizeof(struct xen_dumpcore_p2m) * MAX_BATCH_SIZE;
 	nr_pages = xd->xc_core.header.xch_nr_pages;
 
         if (lseek(xd->xfd, offset, SEEK_SET) == -1)
                 error(FATAL, "cannot lseek to page index\n");
 
         for (b = 0; b < nr_pages; b += MAX_BATCH_SIZE) {
-
+		size = sizeof(struct xen_dumpcore_p2m) *
+			MIN(MAX_BATCH_SIZE, nr_pages - b);
                 if (read(xd->xfd, &p2m_batch[0], size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return MFN_NOT_FOUND;
@@ -1518,6 +1518,7 @@ xc_core_mfns(ulong arg, FILE *ofp)
 	uint nr_pages;
         ulong tmp[MAX_BATCH_SIZE];
         ulonglong tmp64[MAX_BATCH_SIZE];
+	size_t size;
 
         if (lseek(xd->xfd, (off_t)xd->xc_core.header.xch_index_offset,
             SEEK_SET) == -1) {
@@ -1563,8 +1564,9 @@ check_next_4:
 		nr_pages = xd->xc_core.header.xch_nr_pages;
 
 	        for (b = 0; b < nr_pages; b += MAX_BATCH_SIZE) {
-	                if (read(xd->xfd, tmp, sizeof(ulong) * MAX_BATCH_SIZE) !=
-	                    (MAX_BATCH_SIZE * sizeof(ulong))) {
+			size = sizeof(ulong) *
+				MIN(MAX_BATCH_SIZE, nr_pages - b);
+	                if (read(xd->xfd, tmp, size) != size) {
 	                        error(INFO, "cannot read index page %d\n", b);
 	                        return FALSE;
 	                }
@@ -1595,8 +1597,9 @@ show_64bit_mfns:
 		nr_pages = xd->xc_core.header.xch_nr_pages;
 
 	        for (b = 0; b < nr_pages; b += MAX_BATCH_SIZE) {
-	                if (read(xd->xfd, tmp64, sizeof(ulonglong) * MAX_BATCH_SIZE) !=
-	                    (MAX_BATCH_SIZE * sizeof(ulonglong))) {
+			size = sizeof(ulonglong) *
+				MIN(MAX_BATCH_SIZE, nr_pages - b);
+			if (read(xd->xfd, tmp64, size) != size) {
 	                        error(INFO, "cannot read index page %d\n", b);
 	                        return FALSE;
 	                }
@@ -1715,7 +1718,6 @@ xc_core_elf_pfn_to_page_index(ulong pfn)
         struct xen_dumpcore_p2m p2m_batch[MAX_BATCH_SIZE];
 
         offset = xd->xc_core.header.xch_index_offset;
-        size = sizeof(struct xen_dumpcore_p2m) * MAX_BATCH_SIZE;
 	nr_pages = xd->xc_core.header.xch_nr_pages;
 
 	/*
@@ -1744,7 +1746,8 @@ xc_core_elf_pfn_to_page_index(ulong pfn)
                 error(FATAL, "cannot lseek to page index\n");
 
         for (b = start_index; b < nr_pages; b += MAX_BATCH_SIZE) {
-
+		size = sizeof(struct xen_dumpcore_p2m) *
+			MIN(MAX_BATCH_SIZE, nr_pages - b);
                 if (read(xd->xfd, &p2m_batch[0], size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return PFN_NOT_FOUND;
@@ -1844,7 +1847,6 @@ xc_core_elf_pfn_valid(ulong pfn)
         uint64_t pfn_batch[MAX_BATCH_SIZE];
 
         offset = xd->xc_core.header.xch_index_offset;
-        size = sizeof(uint64_t) * MAX_BATCH_SIZE;
 	nr_pages = xd->xc_core.header.xch_nr_pages;
 
 	/*
@@ -1873,7 +1875,7 @@ xc_core_elf_pfn_valid(ulong pfn)
                 error(FATAL, "cannot lseek to page index\n");
 
         for (b = start_index; b < nr_pages; b += MAX_BATCH_SIZE) {
-
+		size = sizeof(uint64_t) * MIN(MAX_BATCH_SIZE, nr_pages - b);
                 if (read(xd->xfd, &pfn_batch[0], size) != size) {
                         error(INFO, "cannot read index page %d\n", b);
 			return PFN_NOT_FOUND;
@@ -1972,32 +1974,48 @@ xendump_print(char *fmt, ...)
  *  Support for xc_core ELF dumpfile format.
  */
 static int
-xc_core_elf_verify(char *buf)
+xc_core_elf_verify(char *file, char *buf)
 {
 	int i;
 	Elf32_Ehdr *elf32;
 	Elf64_Ehdr *elf64;
 	Elf32_Off offset32;
 	Elf64_Off offset64;
+	char *eheader;
+	int swap;
+
+	eheader = buf;
+
+	if (!STRNEQ(eheader, ELFMAG) || eheader[EI_VERSION] != EV_CURRENT)
+		goto bailout;
+
+	swap = (((eheader[EI_DATA] == ELFDATA2LSB) && 
+	     (__BYTE_ORDER == __BIG_ENDIAN)) ||
+	    ((eheader[EI_DATA] == ELFDATA2MSB) && 
+	     (__BYTE_ORDER == __LITTLE_ENDIAN)));
 
 	elf32 = (Elf32_Ehdr *)buf;
 	elf64 = (Elf64_Ehdr *)buf;
 
-        if (STRNEQ(elf32->e_ident, ELFMAG) && 
-	    (elf32->e_ident[EI_CLASS] == ELFCLASS32) &&
-  	    (elf32->e_ident[EI_DATA] == ELFDATA2LSB) &&
-    	    (elf32->e_ident[EI_VERSION] == EV_CURRENT) &&
-	    (elf32->e_type == ET_CORE) &&
-	    (elf32->e_version == EV_CURRENT) &&
-	    (elf32->e_shnum > 0)) {
-		switch (elf32->e_machine)
+        if ((elf32->e_ident[EI_CLASS] == ELFCLASS32) &&
+	    (swap16(elf32->e_type, swap) == ET_CORE) &&
+	    (swap32(elf32->e_version, swap) == EV_CURRENT) &&
+	    (swap16(elf32->e_shnum, swap) > 0)) {
+		switch (swap16(elf32->e_machine, swap))
 		{
 		case EM_386:
-			if (machine_type("X86"))
-				break;
+			if (machine_type_mismatch(file, "X86", NULL, 0))
+				goto bailout;
+			break;
+
 		default:
-                	goto bailout;
+			if (machine_type_mismatch(file, "(unknown)", NULL, 0))
+				goto bailout;
+			break;
 		}
+
+		if (endian_mismatch(file, elf32->e_ident[EI_DATA], 0))
+			goto bailout;
 
 		xd->xc_core.elf_class = ELFCLASS32;
         	if ((xd->xc_core.elf32 = (Elf32_Ehdr *)malloc(sizeof(Elf32_Ehdr))) == NULL) {
@@ -2006,38 +2024,34 @@ xc_core_elf_verify(char *buf)
 		}
 		BCOPY(buf, xd->xc_core.elf32, sizeof(Elf32_Ehdr));
 
-	} else if (STRNEQ(elf64->e_ident, ELFMAG) &&
-	    (elf64->e_ident[EI_CLASS] == ELFCLASS64) &&
-	    (elf64->e_ident[EI_VERSION] == EV_CURRENT) &&
-	    (elf64->e_type == ET_CORE) &&
-	    (elf64->e_version == EV_CURRENT) &&
-	    (elf64->e_shnum > 0)) { 
-		switch (elf64->e_machine)
+	} else if ((elf64->e_ident[EI_CLASS] == ELFCLASS64) &&
+	    (swap16(elf64->e_type, swap) == ET_CORE) &&
+	    (swap32(elf64->e_version, swap) == EV_CURRENT) &&
+	    (swap16(elf64->e_shnum, swap) > 0)) { 
+		switch (swap16(elf64->e_machine, swap))
 		{
 		case EM_IA_64:
-			if ((elf64->e_ident[EI_DATA] == ELFDATA2LSB) &&
-				machine_type("IA64"))
-				break;
-			else
+			if (machine_type_mismatch(file, "IA64", NULL, 0))
 				goto bailout;
+			break;
 
 		case EM_X86_64:
-			if ((elf64->e_ident[EI_DATA] == ELFDATA2LSB) &&
-				machine_type("X86_64"))
-				break;
-			else
+			if (machine_type_mismatch(file, "X86_64", "X86", 0))
 				goto bailout;
+			break;
 
 		case EM_386:
-			if ((elf64->e_ident[EI_DATA] == ELFDATA2LSB) &&
-				machine_type("X86"))
-				break;
-			else
+			if (machine_type_mismatch(file, "X86", NULL, 0))
 				goto bailout;
+			break;
 
 		default:
-			goto bailout;
+			if (machine_type_mismatch(file, "(unknown)", NULL, 0))
+				goto bailout;
 		}
+
+		if (endian_mismatch(file, elf64->e_ident[EI_DATA], 0))
+			goto bailout;
 
 		xd->xc_core.elf_class = ELFCLASS64;
         	if ((xd->xc_core.elf64 = (Elf64_Ehdr *)malloc(sizeof(Elf64_Ehdr))) == NULL) {
@@ -2048,7 +2062,7 @@ xc_core_elf_verify(char *buf)
 
 	} else {
 		if (CRASHDEBUG(1))
-			error(INFO, "xc_core_elf_verify: not a xen ELF core file\n");
+			error(INFO, "%s: not a xen ELF core file\n", file);
 		goto bailout;
 	}
 
@@ -2827,3 +2841,8 @@ xc_core_elf_pfn_init(void)
 	}
 }
 
+struct xendump_data *
+get_xendump_data(void)
+{
+	return (XENDUMP_VALID() ? xd : NULL);
+}

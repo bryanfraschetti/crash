@@ -1,8 +1,8 @@
 /* filesys.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -230,7 +230,7 @@ memory_source_init(void)
 static void
 match_proc_version(void)
 {
-	char buffer[BUFSIZE];
+	char buffer[BUFSIZE], *p1, *p2;
 
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
@@ -240,7 +240,7 @@ match_proc_version(void)
 
 	if (match_file_string(pc->namelist, kt->proc_version, buffer)) {
                 if (CRASHDEBUG(1)) {
-			fprintf(fp, "/proc/version:\n%s", kt->proc_version);
+			fprintf(fp, "/proc/version:\n%s\n", kt->proc_version);
 			fprintf(fp, "%s:\n%s", pc->namelist, buffer);
 		}
 		return;
@@ -249,6 +249,24 @@ match_proc_version(void)
 	error(WARNING, "%s%sand /proc/version do not match!\n\n", 
 		pc->namelist, 
 		strlen(pc->namelist) > 39 ? "\n         " : " ");
+
+	/*
+	 *  find_booted_system_map() requires VTOP(), which used to be a 
+	 *  hardwired masking of the kernel address.  But some architectures 
+	 *  may not know what their physical base address is at this point, 
+	 *  and others may have different machdep->kvbase values, so for all
+	 *  but the 0-based kernel virtual address architectures, bail out
+	 *  here with a relevant error message.
+	 */
+	if (!machine_type("S390") && !machine_type("S390X")) {
+		p1 = &kt->proc_version[strlen("Linux version ")];
+		p2 = strstr(p1, " ");
+		*p2 = NULLCHAR;
+		error(WARNING, "/proc/version indicates kernel version: %s\n", p1);
+		error(FATAL, "please use the vmlinux file for that kernel version, or try using\n"
+			"       the System.map for that kernel version as an additional argument.\n", p1);
+		clean_exit(1);
+	}
 
 	if (find_booted_system_map())
                 pc->flags |= SYSMAP;
@@ -690,6 +708,8 @@ get_proc_version(void)
                 return FALSE;
         
         fclose(version);
+
+	strip_linefeeds(kt->proc_version);
 
 	return TRUE;
 }
@@ -1811,8 +1831,12 @@ vfs_init(void)
 
 	if (symbol_exists("height_to_maxindex")) {
 		int tmp;
-		ARRAY_LENGTH_INIT(tmp, height_to_maxindex,
-                        "height_to_maxindex", NULL, 0);
+		if (LKCD_KERNTYPES())
+			ARRAY_LENGTH_INIT_ALT(tmp, "height_to_maxindex",
+				"radix_tree_preload.nodes", NULL, 0);
+		else
+			ARRAY_LENGTH_INIT(tmp, height_to_maxindex,
+                        	"height_to_maxindex", NULL, 0);
 		STRUCT_SIZE_INIT(radix_tree_root, "radix_tree_root");
 		STRUCT_SIZE_INIT(radix_tree_node, "radix_tree_node");
 		MEMBER_OFFSET_INIT(radix_tree_root_height, 
@@ -3462,10 +3486,14 @@ cleanup_memory_driver(void)
 #define RADIX_TREE_MAP_SHIFT  6
 #define RADIX_TREE_MAP_SIZE  (1UL << RADIX_TREE_MAP_SHIFT)
 #define RADIX_TREE_MAP_MASK  (RADIX_TREE_MAP_SIZE-1)
+#define RADIX_TREE_TAGS         2
+#define RADIX_TREE_TAG_LONGS    \
+	((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
 
 struct radix_tree_node {
         unsigned int    count;
         void            *slots[RADIX_TREE_MAP_SIZE];
+	unsigned long	tags[RADIX_TREE_TAGS][RADIX_TREE_TAG_LONGS];
 };
 
 /*
@@ -3617,16 +3645,15 @@ static void *
 radix_tree_lookup(ulong root_rnode, ulong index, int height)
 {
 	unsigned int shift;
-	struct radix_tree_node **slot;
+	void *slot;
 	struct radix_tree_node slotbuf;
-	void **kslotp, **uslotp;
 
 	shift = (height-1) * RADIX_TREE_MAP_SHIFT;
-	kslotp = (void **)root_rnode;
+
+	readmem(root_rnode, KVADDR, &slot, sizeof(void *),
+		"radix_tree_root rnode", FAULT_ON_ERROR);
 
 	while (height > 0) {
-		readmem((ulong)kslotp, KVADDR, &slot, sizeof(void *),
-			"radix_tree_node slot", FAULT_ON_ERROR);
 
 		if (slot == NULL)
 			return NULL;
@@ -3635,15 +3662,13 @@ radix_tree_lookup(ulong root_rnode, ulong index, int height)
 			sizeof(struct radix_tree_node),
 			"radix_tree_node struct", FAULT_ON_ERROR);
 
-		uslotp = (void **)
-		    (slotbuf.slots + ((index >> shift) & RADIX_TREE_MAP_MASK));
-		kslotp = *uslotp;
-
+		slot = slotbuf.slots[((index >> shift) & RADIX_TREE_MAP_MASK)];
+		
 		shift -= RADIX_TREE_MAP_SHIFT;
 		height--;
 	}
 
-	return (void *) kslotp;
+	return slot;
 }
 
 int

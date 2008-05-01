@@ -1,8 +1,8 @@
 /* help.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -105,34 +105,33 @@ NULL
 void
 program_usage(int form)
 {
-	int i;
-	char **p;
-	FILE *less;
-
-	if (form == LONG_FORM)
-		less = popen("/usr/bin/less", "w");
-	else
-		less = NULL;
-
-	p = program_usage_info;
-
-	if (form == LONG_FORM) {
-		if (less)
-			fp = less;
-        	for (i = 0; program_usage_info[i]; i++, p++) {
-                	fprintf(fp, *p, pc->program_name);
-			fprintf(fp, "\n");
-		}
-	} else {
-               	fprintf(fp, *p, pc->program_name);
+	if (form == SHORT_FORM) {
+		fprintf(fp, program_usage_info[0], pc->program_name);
 		fprintf(fp, "\nEnter \"%s -h\" for details.\n",
 			pc->program_name);
-	}
-	fflush(fp);
-	if (less)
-		pclose(less);
+		clean_exit(1);
+	} else {
+		FILE *scroll;
+		char *scroll_command;
+		char **p;
 
-	clean_exit(1);
+		if ((scroll_command = setup_scroll_command()) &&
+		    (scroll = popen(scroll_command, "w")))
+			fp = scroll;
+		else
+			scroll = NULL;
+
+		for (p = program_usage_info; *p; p++) {
+			fprintf(fp, *p, pc->program_name);
+			fprintf(fp, "\n");
+		}
+		fflush(fp);
+
+		if (scroll)
+			pclose(scroll);
+
+		clean_exit(0);
+	}
 }
 
 
@@ -152,8 +151,10 @@ help_init(void)
 	}
 
         for (ext = extension_table; ext; ext = ext->next) {
-		for (cp = ext->command_table; cp->name; cp++)
-			pc->ncmds++;
+		for (cp = ext->command_table; cp->name; cp++) {
+			if (!(cp->flags & (CLEANUP|HIDDEN_COMMAND)))
+				pc->ncmds++;
+		}
 	}
 
         if (!pc->cmdlist) {
@@ -193,8 +194,10 @@ reshuffle_cmdlist(void)
 	}
 
         for (ext = extension_table; ext; ext = ext->next) {
-                for (cp = ext->command_table; cp->name; cp++)
-                	pc->cmdlist[cnt++] = cp->name;
+                for (cp = ext->command_table; cp->name; cp++) {
+			if (!(cp->flags & (CLEANUP|HIDDEN_COMMAND)))
+				pc->cmdlist[cnt++] = cp->name;
+		}
         }
 
 	if (cnt > pc->cmdlistsz)
@@ -393,7 +396,7 @@ cmd_help(void)
 		if (oflag) 
 			dump_offset_table(args[optind], FALSE);
 		else	
-        		cmd_usage(args[optind], COMPLETE_HELP);
+        		cmd_usage(args[optind], COMPLETE_HELP|MUST_HELP);
 		optind++;
         } while (args[optind]);
 }
@@ -655,6 +658,10 @@ char *help_set[] = {
 "  argument is entered, the current value of the %s variable is shown.  These",
 "  are the %s variables, acceptable arguments, and purpose:\n",
 "          scroll  on | off     controls output scrolling.",
+"          scroll  less         /usr/bin/less as the output scrolling program.",
+"          scroll  more         /bin/more as the output scrolling program.",
+"          scroll  CRASHPAGER   use CRASHPAGER environment variable as the",
+"                               output scrolling program.",
 "           radix  10 | 16      sets output radix to 10 or 16.",
 "         refresh  on | off     controls internal task list refresh.",
 "       print_max  number       set maximum number of array elements to print.",
@@ -700,11 +707,11 @@ char *help_set[] = {
 "       STATE: TASK_RUNNING (PANIC)\n",
 "  Turn off output scrolling:\n",
 "    %s> set scroll off",
-"    scroll: off",
+"    scroll: off (/usr/bin/less)",
 " ",
 "  Show the current state of %s internal variables:\n", 
 "    %s> set -v",
-"            scroll: on",
+"            scroll: on (/usr/bin/less)",
 "             radix: 10 (decimal)",
 "           refresh: on",
 "         print_max: 256",
@@ -794,7 +801,7 @@ NULL
 char *help_ps[] = {
 "ps",
 "display process status information",
-"[-k|-u][-s][-p|-c|-t|-l|-a|-g] [pid | taskp | command] ...",
+"[-k|-u][-s][-p|-c|-t|-l|-a|-g|-r] [pid | taskp | command] ...",
 "  This command displays process status for selected, or all, processes" ,
 "  in the system.  If no arguments are entered, the process data is",
 "  is displayed for all processes.  Selected process identifiers can be",
@@ -830,8 +837,8 @@ char *help_ps[] = {
 "  angle bracket (\">\") preceding its information.",
 " ",
 "  Alternatively, information regarding parent-child relationships,",
-"  per-task time usage data, argument/environment data, or thread groups",
-"  may be displayed:",
+"  per-task time usage data, argument/environment data, thread groups,",
+"  or resource limits may be displayed:",
 " ",
 "       -p  display the parental hierarchy of selected, or all, tasks.",  
 "       -c  display the children of selected, or all, tasks.",
@@ -843,6 +850,7 @@ char *help_ps[] = {
 "       -a  display the command line arguments and environment strings of",
 "           selected, or all, user-mode tasks.",
 "       -g  display tasks by thread group, of selected, or all, tasks.",
+"       -r  display resource limits (rlimits) of selected, or all, tasks.",
 "\nEXAMPLES",
 "  Show the process status of all current tasks:\n",
 "    %s> ps",
@@ -1086,13 +1094,29 @@ char *help_ps[] = {
 "      PID: 2529   TASK: 1003f0c37f0       CPU: 1   COMMAND: \"multi-thread\"",
 "      PID: 2530   TASK: 10035597030       CPU: 1   COMMAND: \"multi-thread\"",
 "      PID: 2531   TASK: 100184be7f0       CPU: 1   COMMAND: \"multi-thread\"",
+" ",
+"  Display the resource limits of \"bash\" task 13896:\n",
+"    %s> ps -r 13896",
+"    PID: 13896  TASK: cf402000  CPU: 0   COMMAND: \"bash\"",
+"       RLIMIT     CURRENT       MAXIMUM",
+"          CPU   (unlimited)   (unlimited)",
+"        FSIZE   (unlimited)   (unlimited)",
+"         DATA   (unlimited)   (unlimited)",
+"        STACK    10485760     (unlimited)",
+"         CORE   (unlimited)   (unlimited)",
+"          RSS   (unlimited)   (unlimited)",
+"        NPROC      4091          4091",
+"       NOFILE      1024          1024",
+"      MEMLOCK      4096          4096",
+"           AS   (unlimited)   (unlimited)",
+"        LOCKS   (unlimited)   (unlimited)",
 NULL               
 };
 
 char *help_rd[] = {
 "rd",
 "read memory",
-"[-dDsupxmf][-8|-16|-32|-64][-o offs][-e addr] [address|symbol] [count]",
+"[-dDsSupxmf][-8|-16|-32|-64][-o offs][-e addr] [address|symbol] [count]",
 "  This command displays the contents of memory, with the output formatted",
 "  in several different manners.  The starting address may be entered either",
 "  symbolically or by address.  The default output size is the size of a long",
@@ -1106,6 +1130,9 @@ char *help_rd[] = {
 "       -d  display output in signed decimal format (default is hexadecimal).",
 "       -D  display output in unsigned decimal format (default is hexadecimal).",
 "       -s  displays output symbolically when appropriate.",
+"       -S  displays output symbolically when appropriate; if the address",
+"           references a slab cache object, the name of the slab cache will",
+"           be displayed in brackets.",
 "       -x  do not display ASCII translation at end of each line.",
 #ifdef NOTDEF
 "    -o       Shows offset value from the starting address.",
@@ -1128,35 +1155,38 @@ char *help_rd[] = {
 "  Display the kernel_version string:\n",
 "    %s> rd kernel_version 4 ",
 "    c0226a6c:  2e322e32 35312d35 00000000 00000001   2.2.5-15........\n",
-"  Display the same block of memory, with and without symbols:\n",
-"    %s> rd c1157f00 52   ",
-"    c1157f00:  c0131f7a 00000400 00000015 c013206e   z...........n ..",
-"    c1157f10:  00000100 c3d4c140 00000100 00000246   ....@.......F...",
-"    c1157f20:  019b2065 c2a5bb90 080ac618 c02a83d0   e ............*.",
-"    c1157f30:  40000025 01a45067 c1156000 00000000   %..@gP...`......",
-"    c1157f40:  c011b4f7 c1156000 c2a5bb90 080ac618   .....`..........",
-"    c1157f50:  00000001 00000000 c1a45000 c19b2000   .........P... ..",
-"    c1157f60:  c1157f84 0000003b c022c000 c1156000   ....;.....\"..`..",
-"    c1157f70:  00000000 fffffe00 bffff6fc 0000002e   ................",
-"    c1157f80:  c022c000 ffffffff c01178ba c1156000   ..\"......x...`..",
-"    c1157f90:  00000000 080ac618 bffff6ac 00000001   ................",
-"    c1157fa0:  c1156000 c1156000 c1157fb8 c1156000   .`...`.......`..",
-"    c1157fb0:  c1157fb8 c1156000 c1156000 c115608c   .....`...`...`..",
-"    c1157fc0:  c01096c8 ffffffff bffff6fc 00000002   ................\n",
-"    %s> rd -s c1157f00 52",
-"    c1157f00:  alloc_fd_array+0x1a 00000400 00000015 expand_fd_array+0x72 ",
-"    c1157f10:  00000100 c3d4c140 00000100 00000246 ",
-"    c1157f20:  019b2065 c2a5bb90 080ac618 c02a83d0 ",
-"    c1157f30:  40000025 01a45067 c1156000 00000000 ",
-"    c1157f40:  do_wp_page+0x17f c1156000 c2a5bb90 080ac618 ",
-"    c1157f50:  00000001 00000000 c1a45000 c19b2000 ",
-"    c1157f60:  c1157f84 0000003b init_task_union c1156000 ",
-"    c1157f70:  00000000 fffffe00 bffff6fc 0000002e ",
-"    c1157f80:  init_task_union ffffffff sys_wait4+0x2be c1156000 ",
-"    c1157f90:  00000000 080ac618 bffff6ac 00000001 ",
-"    c1157fa0:  c1156000 c1156000 c1157fb8 c1156000 ",
-"    c1157fb0:  c1157fb8 c1156000 c1156000 c115608c ",
-"    c1157fc0:  system_call+0x34 ffffffff bffff6fc 00000002\n",
+"  Display the same block of memory, first without symbols, again",
+"  with symbols, and then with symbols and slab cache references:\n",
+"    %s> rd dff12e80 36",
+"    dff12e80:  dff12e94 00000000 c05a363a dff12ed0   ........:6Z.....",
+"    dff12e90:  00000001 dff12e98 0041fe3f ffffffff   ........?.A.....",
+"    dff12ea0:  00000001 d5147800 00000000 def8abc0   .....x..........",
+"    dff12eb0:  dff12ebc c05a4aa0 00000000 dff12ed0   .....JZ.........",
+"    dff12ec0:  00000001 00000000 00000000 00000000   ................",
+"    dff12ed0:  0808b353 00000000 dff12efc c0698220   S........... .i.",
+"    dff12ee0:  dff12efc df7c6480 00000001 c046f99b   .....d|.......F.",
+"    dff12ef0:  00000000 00000000 0808b352 dff12f68   ........R...h/..",
+"    dff12f00:  c155a128 00000000 00000001 ffffffff   (.U.............",
+"    %s> rd -s dff12e80 36",
+"    dff12e80:  dff12e94 00000000 sock_aio_write+83 dff12ed0 ",
+"    dff12e90:  00000001 dff12e98 0041fe3f ffffffff ",
+"    dff12ea0:  00000001 d5147800 00000000 def8abc0 ",
+"    dff12eb0:  dff12ebc sys_recvfrom+207 00000000 dff12ed0 ",
+"    dff12ec0:  00000001 00000000 00000000 00000000 ",
+"    dff12ed0:  0808b353 00000000 dff12efc socket_file_ops ",
+"    dff12ee0:  dff12efc df7c6480 00000001 do_sync_write+182 ",
+"    dff12ef0:  00000000 00000000 0808b352 dff12f68 ",
+"    dff12f00:  c155a128 00000000 00000001 ffffffff ",
+"    %s> rd -S dff12e80 36",
+"    dff12e80:  [size-4096] 00000000 sock_aio_write+83 [size-4096] ",
+"    dff12e90:  00000001 [size-4096] 0041fe3f ffffffff ",
+"    dff12ea0:  00000001 [sock_inode_cache] 00000000 [filp]   ",
+"    dff12eb0:  [size-4096] sys_recvfrom+207 00000000 [size-4096] ",
+"    dff12ec0:  00000001 00000000 00000000 00000000 ",
+"    dff12ed0:  0808b353 00000000 [size-4096] socket_file_ops ",
+"    dff12ee0:  [size-4096] [filp]   00000001 do_sync_write+182 ",
+"    dff12ef0:  00000000 00000000 0808b352 [size-4096] ",
+"    dff12f00:  [vm_area_struct] 00000000 00000001 ffffffff\n",
 "  Read jiffies in hexadecimal and decimal format:\n",
 "    %s> rd jiffies",
 "    c0213ae0:  0008cc3a                              :...\n",
@@ -1505,13 +1535,20 @@ char *help_extend[] = {
 " ",
 "  Below is an example shared object file consisting of just one command, ",
 "  called \"echo\", which simply echoes back all arguments passed to it.",
-"  Note the comments contained within it for further details.  To build it,",
-"  cut and paste the following output into a file, and call it, for example,",
-"  \"echo.c\".  Then compile like so:",
+"  Note the comments contained within it for further details.  Cut and paste",
+"  the following output into a file, and call it, for example, \"echo.c\".",
+"  Then compiled in either of two manners.  Either manually like so:",
 " ",
-"  gcc -nostartfiles -shared -rdynamic -o echo.so echo.c -fPIC -D<machine_type>",
+"  gcc -nostartfiles -shared -rdynamic -o echo.so echo.c -fPIC -D<machine-type> $(TARGET_CFLAGS)",
 " ",
-"  where <machine-type> must be one of the MACHINE_TYPE #define's in defs.h.",
+"  where <machine-type> must be one of the MACHINE_TYPE #define's in defs.h,",
+"  and where $(TARGET_CFLAGS) is the same as it is declared in the top-level",
+"  Makefile after a build is completed.  Or alternatively, the \"echo.c\" file",
+"  can be copied into the \"extensions\" subdirectory, and compiled automatically",
+"  like so:",
+" ",
+"  make extensions",
+" ",
 "  The echo.so file may be dynamically linked into %s during runtime, or",
 "  during initialization by putting \"extend echo.so\" into a .%src file",
 "  located in the current directory, or in the user's $HOME directory.",
@@ -1625,7 +1662,7 @@ char *help_mach[] = {
 "        PROCESSOR SPEED: 1993 Mhz",
 "                     HZ: 100",
 "              PAGE SIZE: 4096",
-"          L1 CACHE SIZE: 32",
+// "          L1 CACHE SIZE: 32",
 "    KERNEL VIRTUAL BASE: c0000000",
 "    KERNEL VMALLOC BASE: e0800000",
 "      KERNEL STACK SIZE: 8192",
@@ -2006,7 +2043,7 @@ NULL
 char *help_irq[] = {
 "irq",
 "IRQ data",
-"[-d | -b | [index ...]]",
+"[[[index ...] | -u] | -d | -b]",
 "  This command collaborates the data in an irq_desc_t, along with its",
 "  associated hw_interrupt_type and irqaction structure data, into a",
 "  consolidated per-IRQ display.  Alternatively, the intel interrupt",
@@ -2014,6 +2051,7 @@ char *help_irq[] = {
 "  If no index value argument(s) nor any options are entered, the IRQ",
 "  data for all IRQs will be displayed.\n",
 "    index   a valid IRQ index.",
+"       -u   dump data for in-use IRQs only.",  
 "       -d   dump the intel interrupt descriptor table.",
 "       -b   dump bottom half data.",
 "\nEXAMPLES",
@@ -3829,7 +3867,7 @@ NULL
 char *help_kmem[] = {
 "kmem",
 "kernel memory",
-"[-f|-F|-p|-c|-C|-i|-s|-S|-v|-V|-n] [-[l|L][a|i]] [slab] [[-P] address]",
+"[-f|-F|-p|-c|-C|-i|-s|-S|-v|-V|-n|-z] [-[l|L][a|i]] [slab] [[-P] address]",
 "  This command displays information about the use of kernel memory.\n",
 "        -f  displays the contents of the system free memory headers.",
 "            also verifies that the page count equals nr_free_pages.",
@@ -3841,10 +3879,16 @@ char *help_kmem[] = {
 "        -i  displays general memory usage information",
 "        -s  displays basic kmalloc() slab data.",
 "        -S  displays all kmalloc() slab data, including all slab objects,",
-"            and whether each object is in use or is free.",
+"            and whether each object is in use or is free.  If CONFIG_SLUB,",
+"            slab data for each per-cpu slab is displayed, along with the",
+"            address of each kmem_cache_node, its count of full and partial",
+"            slabs, and a list of all tracked slabs.",
 "        -v  displays the vmlist entries.",
-"        -V  displays the kernel vm_stat table.",
+"        -V  displays the kernel vm_stat table if it exists, the cumulative",
+"            page_states counter values if they exist, and/or the cumulative",
+"            vm_event_states counter values if they exist.",
 "        -n  display memory node data (if supported).",
+"        -z  displays per-zone memory statistics.",
 "       -la  walks through the active_list and verifies nr_active_pages.",
 "       -li  walks through the inactive_list and verifies nr_inactive_pages.",
 "       -La  same as -la, but also dumps each page in the active_list.",
@@ -3856,9 +3900,12 @@ char *help_kmem[] = {
 "   address  when used without any flag, the address can be a kernel virtual,",
 "            or physical address; a search is made through the symbol table,",
 "            the kmalloc() slab subsystem, the free list, the page_hash_table,",
-"            the vmalloc() vmlist subsystem, and the mem_map array. If found",
-"            in any of those areas, the information will be dumped in the",
-"            same manner as if the flags were used.",
+"            the vmalloc() vmlist subsystem, the current set of task_structs",
+"            and kernel stacks, and the mem_map array.  If found in any of",
+"            those areas, the information will be dumped in the same manner as",
+"            if the location-specific flags were used; if contained within a",
+"            curent task_struct or kernel stack, that task's context will be",
+"            displayed.",
 "   address  when used with -s or -S, searches the kmalloc() slab subsystem",
 "            for the slab containing of this virtual address, showing whether",
 "            it is in use or free.",
@@ -4881,21 +4928,22 @@ NULL
 void
 cmd_usage(char *cmd, int helpflag)
 {
-	int i;
-        int found;
-	char **p;
+	char **p, *scroll_command;
 	struct command_table_entry *cp;
 	char buf[BUFSIZE];
-	struct alias_data *ad;
-	FILE *less;
+	FILE *scroll;
+	int i;
 
-	if (helpflag & PIPE_TO_LESS) {
-	        if ((less = popen("/usr/bin/less", "w")) != NULL)
-			fp = less;
-		helpflag &= ~PIPE_TO_LESS;
-	} else
-		less = NULL;
-		
+	if (helpflag & PIPE_TO_SCROLL) {
+		if ((scroll_command = setup_scroll_command()) &&
+                    (scroll = popen(scroll_command, "w")))
+			fp = scroll;
+                else
+                        scroll = NULL;
+	} else {
+		scroll_command = NULL;
+		scroll = NULL;
+	}
 
 	if (STREQ(cmd, "copying")) {
 		display_copying_info();
@@ -4938,46 +4986,50 @@ cmd_usage(char *cmd, int helpflag)
 		goto done_usage;
 	}
 
-	found = FALSE;
-retry:
-	if ((cp = get_command_table_entry(cmd))) {
-		if ((p = cp->help_data))
-			found = TRUE;
+	/* look up command, possibly through an alias */
+	for (;;) {
+		struct alias_data *ad;
+
+		cp = get_command_table_entry(cmd);
+		if (cp != NULL)
+			break;	/* found command */
+
+		/* try for an alias */
+		ad = is_alias(cmd);
+		if (ad == NULL)
+			break;	/* neither command nor alias */
+
+		cmd = ad->args[0];
+		cp = get_command_table_entry(cmd);
 	}
 
-       /*
-	*  Check for alias names or gdb commands.
-	*/
-	if (!found) {
-		if ((ad = is_alias(cmd))) {
-			cmd = ad->args[0];
-			goto retry;
-		}
-
-		if (helpflag == SYNOPSIS) { 
-                	fprintf(fp,
-                         "No usage data for the \"%s\" command is available.\n",
+	if (cp == NULL || (p = cp->help_data) == NULL) {
+		if (helpflag & SYNOPSIS) { 
+			fprintf(fp,
+				"No usage data for the \"%s\" command"
+				" is available.\n",
 				cmd);
 			RESTART();
 		}
 
-		if (STREQ(pc->curcmd, "help")) {
-			if (cp)
-                		fprintf(fp,
-                          "No help data for the \"%s\" command is available.\n",
+		if (helpflag & MUST_HELP) {
+			if (cp || !(pc->flags & GDB_INIT))
+				fprintf(fp,
+				    "No help data for the \"%s\" command"
+				    " is available.\n",
 					cmd);
 			else if (!gdb_pass_through(concat_args(buf, 0, FALSE), 
 				NULL, GNU_RETURN_ON_ERROR))
 				fprintf(fp, 
-				    "No help data for \"%s\" is available.\n",
-                                	cmd);
+					"No help data for \"%s\" is available.\n",
+					cmd);
 		}
 		goto done_usage;
         }
 
 	p++;
 
-        if (helpflag == SYNOPSIS) {
+        if (helpflag & SYNOPSIS) {
                 p++;
                 fprintf(fp, "Usage: %s ", cmd);
 		fprintf(fp, *p, pc->program_name, pc->program_name);
@@ -5008,10 +5060,12 @@ retry:
 
 done_usage:
 
-	if (less) {
-		fflush(less);
-		pclose(less);
+	if (scroll) {
+		fflush(scroll);
+		pclose(scroll);
 	}
+	if (scroll_command)
+		FREEBUF(scroll_command);
 }
 
 
@@ -5153,13 +5207,13 @@ display_version(void)
 static 
 char *version_info[] = {
 
-"Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007  Red Hat, Inc.",
+"Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008  Red Hat, Inc.",
 "Copyright (C) 2004, 2005, 2006  IBM Corporation", 
 "Copyright (C) 1999-2006  Hewlett-Packard Co",
 "Copyright (C) 2005, 2006  Fujitsu Limited",
 "Copyright (C) 2006, 2007  VA Linux Systems Japan K.K.",
 "Copyright (C) 2005  NEC Corporation",
-"Copyright (C) 1999, 2002  Silicon Graphics, Inc.",
+"Copyright (C) 1999, 2002, 2007  Silicon Graphics, Inc.",
 "Copyright (C) 1999, 2000, 2001, 2002  Mission Critical Linux, Inc.",
 "This program is free software, covered by the GNU General Public License,",
 "and you are welcome to change it and/or distribute copies of it under",

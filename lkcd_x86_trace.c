@@ -5,8 +5,8 @@
 /* 
  *  lkcd_x86_trace.c
  *
- *  Copyright (C) 2002, 2003, 2004, 2005, 2006 David Anderson
- *  Copyright (C) 2002, 2003, 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ *  Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ *  Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  *  Adapted as noted from the following LKCD files:
  *
@@ -54,10 +54,9 @@ static int eframe_incr(kaddr_t, char *);
 static int find_trace(kaddr_t, kaddr_t, kaddr_t, kaddr_t, trace_t *, int);
 static void dump_stack_frame(trace_t *, sframe_t *, FILE *);
 static void print_trace(trace_t *, int, FILE *);
-struct pt_regs;
-static int eframe_type(struct pt_regs *);
+static int eframe_type(uaddr_t *);
 char *funcname_display(char *);
-static void print_eframe(FILE *, struct pt_regs *);
+static void print_eframe(FILE *, uaddr_t *);
 static void trace_banner(FILE *);
 static void print_kaddr(kaddr_t, FILE *, int);
 int do_text_list(kaddr_t, int, FILE *);
@@ -1122,7 +1121,6 @@ valid_ra_function(kaddr_t ra, char *funcname)
         return(0);
 }
 
-#include <asm/ptrace.h>
 #ifndef REDHAT
 #include <asm/segment.h>
 #endif
@@ -1148,34 +1146,34 @@ valid_ra_function(kaddr_t ra, char *funcname)
  * Check if the exception frame is of kernel or user type 
  * Is checking only DS and CS values sufficient ?
  */
-int eframe_type(struct pt_regs *regs)
+
+int eframe_type(uaddr_t *int_eframe)
 {
-	if (((regs->xcs & 0xffff) == __KERNEL_CS) && 
-			((regs->xds & 0xffff) == __KERNEL_DS))
+	ushort xcs, xds;
+
+	xcs = (ushort)(int_eframe[INT_EFRAME_CS] & 0xffff);
+	xds = (ushort)(int_eframe[INT_EFRAME_DS] & 0xffff);
+
+	if ((xcs == __KERNEL_CS) && (xds == __KERNEL_DS))
 		return KERNEL_EFRAME;
 #ifdef REDHAT
-	else if (((regs->xcs & 0xffff) == 0x60) && 
-			((regs->xds & 0xffff) == 0x68))
+	else if ((xcs == 0x60) && (xds == 0x68))
 		return KERNEL_EFRAME;
-        else if (((regs->xcs & 0xffff) == 0x60) &&
-                        ((regs->xds & 0xffff) == 0x7b))
-                return KERNEL_EFRAME;
-	else if (XEN() && ((regs->xcs & 0xffff) == 0x61) &&
-                        ((regs->xds & 0xffff) == 0x7b))
+	else if ((xcs == 0x60) && (xds == 0x7b))
+		return KERNEL_EFRAME;
+	else if (XEN() && (xcs == 0x61) && (xds == 0x7b))
 		return KERNEL_EFRAME;
 #endif
-	else if (((regs->xcs & 0xffff) == __USER_CS) && 
-			((regs->xds & 0xffff) == __USER_DS))
+	else if ((xcs == __USER_CS) && (xds == __USER_DS))
 		return USER_EFRAME;
 #ifdef REDHAT
-	else if (((regs->xcs & 0xffff) == 0x73) && 
-			((regs->xds & 0xffff) == 0x7b))
+	else if ((xcs == 0x73) && (xds == 0x7b))
 		return USER_EFRAME;
 #endif
 	return -1;
 }
 
-void print_eframe(FILE *ofp, struct pt_regs *regs)
+void print_eframe(FILE *ofp, uaddr_t *regs)
 {
 	int type = eframe_type(regs);
 
@@ -1350,7 +1348,7 @@ find_trace(
 	int flag;
 	int interrupted_system_call = FALSE;
 	struct bt_info *bt = trace->bt;
-	struct pt_regs *pt;
+	uaddr_t *pt;
 #endif
 	sbp = trace->stack[curstkidx].ptr;
 	sbase = trace->stack[curstkidx].addr;
@@ -1424,7 +1422,9 @@ find_trace(
 #ifdef REDHAT
 		if (XEN_HYPER_MODE()) {
 			func_name = kl_funcname(pc);
-			if (STREQ(func_name, "idle_loop") || STREQ(func_name, "hypercall")) {
+			if (STREQ(func_name, "idle_loop") || STREQ(func_name, "hypercall")
+				|| STREQ(func_name, "tracing_off")
+				|| STREQ(func_name, "handle_exception")) {
 				UPDATE_FRAME(func_name, pc, 0, sp, bp, asp, 0, 0, bp - sp, 0);
 				return(trace->nframes);
 			}
@@ -1623,14 +1623,14 @@ find_trace(
 				asp = (uaddr_t*)((uaddr_t)sbp + (STACK_SIZE - 
 							(saddr - sp)));
 				curframe = alloc_sframe(trace, flags);
-				ra = ((struct pt_regs *)asp)->eip;
-				frame_type = eframe_type((struct pt_regs*)asp);
+				ra = asp[INT_EFRAME_EIP];
+				frame_type = eframe_type(asp);
 				UPDATE_FRAME(func_name, pc, ra, sp, bp, asp, 
 						0, 0, (bp - sp + 4), EX_FRAME);
 
 				/* prepare for next kernel frame, if present */
 				if (frame_type == KERNEL_EFRAME) {
-					pc = ((struct pt_regs *)asp)->eip;
+					pc = asp[INT_EFRAME_EIP];
 					sp = curframe->fp+4;
 #ifdef REDHAT
 					bp = sp + get_framesize(pc, bt);
@@ -1649,20 +1649,20 @@ find_trace(
 				sp = curframe->fp + 4;
 				asp = (uaddr_t*)((uaddr_t)sbp + (STACK_SIZE - 
 						(saddr - sp)));
-				frame_type = eframe_type((struct pt_regs*)asp);
+				frame_type = eframe_type(asp);
 				if (frame_type == KERNEL_EFRAME)
 					bp = curframe->fp+(KERNEL_EFRAME_SZ-1)*4;
 				else 
 					bp = curframe->fp+(USER_EFRAME_SZ-1)*4;
 				curframe = alloc_sframe(trace, flags);
-				ra = ((struct pt_regs *)asp)->eip;
+				ra = asp[INT_EFRAME_EIP];
 				UPDATE_FRAME(func_name, pc, ra, sp, bp + 4, asp,
 			       	0, 0, curframe->fp - curframe->sp+4, EX_FRAME);
 
 				/* prepare for next kernel frame, if present */
 				if (frame_type == KERNEL_EFRAME) {
 					sp = curframe->fp + 4;
-					pc = ((struct pt_regs *)asp)->eip;
+					pc = asp[INT_EFRAME_EIP];
 #ifdef REDHAT
 					bp = sp + get_framesize(pc, bt);
 #else
@@ -1681,7 +1681,10 @@ find_trace(
 			}
 		}
 		if (func_name && XEN_HYPER_MODE()) {
-			if (STREQ(func_name, "continue_nmi")) {
+			if (STREQ(func_name, "continue_nmi") ||
+			    STREQ(func_name, "vmx_asm_vmexit_handler") ||
+			    STREQ(func_name, "handle_nmi_mce") ||
+			    STREQ(func_name, "deferred_nmi")) {
 				/* Interrupt frame */
 				sp = curframe->fp + 4;
 				asp = (uaddr_t*)((uaddr_t)sbp + (STACK_SIZE - 
@@ -1697,6 +1700,8 @@ find_trace(
 				sp = curframe->fp + 4;
 				bp = sp + get_framesize(pc, bt);
 				func_name = kl_funcname(pc);
+				if (!func_name)
+					return trace->nframes;
 				continue;
 			}
 		}
@@ -1706,7 +1711,7 @@ find_trace(
 		 */
                 if ((bt->flags & BT_XEN_STOP_THIS_CPU) && bt->tc->mm_struct &&
                     STREQ(kl_funcname(curframe->pc), "hypervisor_callback")) {
-                	pt = (struct pt_regs *)(curframe->asp+1);
+                	pt = curframe->asp+1;
                         if (eframe_type(pt) == USER_EFRAME) {
 				if (program_context.debug >= 1)  /* pc above */
                         		error(INFO, 
@@ -1798,7 +1803,7 @@ print_trace(trace_t *trace, int flags, FILE *ofp)
 #ifdef REDHAT
 	kaddr_t fp = 0;
 	kaddr_t last_fp, last_pc, next_fp, next_pc;
-	struct pt_regs *pt;
+	uaddr_t *pt;
 	struct bt_info *bt;
 
 	bt = trace->bt;
@@ -1859,7 +1864,7 @@ print_trace(trace_t *trace, int flags, FILE *ofp)
 			fprintf(ofp, " [0x%x]\n", frmp->pc);
 #endif
 			if (frmp->flag & EX_FRAME) {
-				pt = (struct pt_regs *)frmp->asp;
+				pt = frmp->asp;
 				if (CRASHDEBUG(1))
 					fprintf(ofp, 
 					    " EXCEPTION FRAME: %lx\n", 
@@ -2254,7 +2259,7 @@ do_bt_reference_check(struct bt_info *bt, sframe_t *frmp)
 		    (sp && (bt->ref->hexval == sp->value))) 
                         bt->ref->cmdflags |= BT_REF_FOUND;
                 if (frmp->flag & EX_FRAME) {
-			type = eframe_type((struct pt_regs *)frmp->asp);
+			type = eframe_type(frmp->asp);
 			x86_dump_eframe_common(bt, (ulong *)frmp->asp, 
 				(type == KERNEL_EFRAME));
 		}
@@ -2531,7 +2536,8 @@ eframe_label(char *funcname, ulong eip)
 			efp->tracesys_exit = symbol_search("tracesys_exit");
 		}
 
-		if ((efp->sysenter = symbol_search("sysenter_entry"))) {
+		if ((efp->sysenter = symbol_search("sysenter_entry")) ||
+		    (efp->sysenter = symbol_search("ia32_sysenter_target"))) {
                 	if ((sp = symbol_search("sysexit_ret_end_marker")))
                         	efp->sysenter_end = sp;
                 	else if ((sp = symbol_search("system_call")))

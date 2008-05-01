@@ -1,3 +1,192 @@
+crash (4.0-6.3-1) unstable; urgency=low
+
+  * New upstream version 4.0-6.3 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Support FC9 kernels with the utrace patch.
+    - Improve "search -k" scalability
+    - Change how ppc64 examines the cpu map.
+    - Fix for ppc64 "bt" command on panic/active task when cpus were offline
+    - vtop support of 1MB large pages on z10 (s390)
+    - Layout fix to crash man page
+    - Support for xen 3.1.2 hypervisor on x86 and amd64
+
+ -- Troy Heber <troyh@debian.org>  Thu, 01 May 2008 09:20:21 -0600
+
+crash (4.0-6.2-1) unstable; urgency=low
+
+  * New upstream version 4.0-6.2 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - new "rd -S" optoin recognizes the VA of slab objects
+    - "keme -[sS]" directly show containing object and add SLUB support
+    - Fix init time failure with Ubuntu kernels becasue of /proc/version and
+    linux_banner mismatch
+    - Fix "net" command >= 2.6.22 kernels.
+    - "search -k" workaround for ia64 SPARSMEM kernels
+
+ -- Troy Heber <troyh@debian.org>  Mon, 31 Mar 2008 12:24:01 -0600
+
+crash (4.0-6.1-1) unstable; urgency=low
+
+  * New upstream version 4.0-6.1 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Support for the x86/x86_64 merger >= 2.6.25
+    - Fix bt on live 2.6.25 kernels
+    - New typedef for 2.6.25
+
+ -- Troy Heber <troyh@debian.org>  Tue, 04 Mar 2008 13:29:13 -0700
+
+crash (4.0-5.1-1) unstable; urgency=low
+
+  * New upstream version 4.0-5.1 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - 4.0-5.1 was released ontop of 4.0-5.0 thus I'm including its changes
+    here as well.
+    - Update ps -l to support kernels > 2.6.23
+    - Fix init time failure when running with 2.4 x86 netdump files.
+    - Fix to utalize do_raidx_tree() function
+    - Fix potential seg fault during init if the tasks kernel stack was
+    overrun, thus corrupting the thread_info structure.
+    - Fix for "bt" command when run on xen x86 dom0.
+
+ -- Troy Heber <troyh@debian.org>  Thu, 21 Feb 2008 08:22:18 -0700
+
+crash (4.0-4.13-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.13 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Fix generic error message because of endianness mismatch
+    - update for "kmem -V" to display vm_event_states.
+    - Implement new "kmem -z" option for per-zone memory stats.
+    - Fix RSS ammounts displayed by "ps" and "vm" commands, pre 2.6.13 kernels
+    - x86 "bt" fix when analyzing a post 2.6.20 dump on a pre 2.6.20 machine
+    - Fix for FC8 xen x86 kernel that failed initializatoin
+    - Set default "phys_base" for fully virt relocatable kernels.
+    - New crash "--active" command line option to only gather active tasks
+    from each runqueue, skipping traversal of kernel's pid_hash.
+    - "help -n" formats and display ASCII VMCOREINOF data
+
+ -- Troy Heber <troyh@debian.org>  Tue, 15 Jan 2008 08:40:25 -0700
+
+crash (4.0-4.12-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.12 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Enable kmem and runq command to correctly function on 2.6.24 kernels.
+
+ -- Troy Heber <troyh@debian.org>  Wed, 12 Dec 2007 12:26:14 -0700
+
+crash (4.0-4.11-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.11 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Fix for 2.6.24 pid_namespace (allows crash to come up on 2.6.24 kernels,
+    but most of the kmem commands do not work correctly)
+    - Fix incorrect free page list with "kmem [-f] <addr>" on x86 kernels.
+    - Fix x86 bt command for active tasks in Egenera dumpfiles.
+    - Fix for potential seg fault if a task's kernel stack is overrun.
+    - Fix for "kmem -S" error message
+
+ -- Troy Heber <troyh@debian.org>  Thu, 06 Dec 2007 09:44:40 -0700
+
+crash (4.0-4.10-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.10 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Fix a regression introduced in 4.0-4.9 that causes the "kmem -p" command
+    to fail in SPARSEMEM kernels using anonymous structures.
+
+ -- Troy Heber <troyh@debian.org>  Wed, 21 Nov 2007 09:10:29 -0700
+
+crash (4.0-4.9-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.9 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - kmem -p fix for kernels using anonymous structure
+    - kmem -p fir for SPARSEMEM kernels
+    - mod command now looks in /lib/module/<release>/updates first
+    - SAIL fix for "operation on 'v1' may be undefined"
+    - Fix for 'crash -h [command] > outfile' failures
+    - LKCD compiler warning fixups
+    - kmem -s fix to display a non-fatal warning message
+    - LKCD ia64 get physical start from dump header
+    - s390[x] 4 level page table support
+    - LKCD do not abort() on phys mem zone error, use non-fatal warning
+    instead.
+
+ -- Troy Heber <troyh@debian.org>  Tue, 20 Nov 2007 09:33:25 -0700
+
+crash (4.0-4.8-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.8 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Add support for kernel with the SLUB allocator
+    - Pull backtrace registers on LKCD v8 and later LKCD dumps
+    - SAIL support for ia64, ppc, s390 and s390x
+    - Output the kernel ring buffer in the proper order
+
+ -- Troy Heber <troyh@debian.org>  Tue, 30 Oct 2007 12:49:08 -0600
+
+crash (4.0-4.7-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.7 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Add SAIL (Simple Image Access Language) interpreter
+    - Removed hardwired-dependencies in the top-level and extensions
+    directories
+    - Enhance the "kmem <address" option to search for task_struct and kernel
+    stack addresses.
+    - Fix for determining rip/rsp backtrace hooks for panic task in x86_64 xen
+    dom0 kdumps.
+    - Fix for ia64 LKCD dumps to find the next task when the task is in the
+    "fixup list"
+    - Fix for potential "mod -[sS]" failures  for mods with a large number of
+    sections.
+    - Fix to prevent dumpfile reads beyond EOF when reading new xen ELF core
+    xendumps.
+  * Fix FTBFS twice in a row bug (Closes: #442528).
+
+ -- Troy Heber <troyh@debian.org>  Tue, 09 Oct 2007 13:30:44 -0600
+
+crash (4.0-4.6-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.6 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - support "runq" on 2.6.20 and > kernles
+    - inital support for LKCD kerntypes created by dwarfextract
+    - "xencrash" update to handle dom0 kdumps. 
+
+ -- Troy Heber <troyh@debian.org>  Mon, 27 Aug 2007 13:25:57 -0600
+
+crash (4.0-4.5-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.5 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - support for PHYSICAL_START / relocation mismatch
+    - 2.6.22 slub support
+    - lkcd kerntypes support
+    - CFS scheduler support
+
+ -- Troy Heber <troyh@debian.org>  Tue, 21 Aug 2007 08:27:22 -0600
+
+crash (4.0-4.3-1) unstable; urgency=low
+
+  * New upstream version 4.0-4.3 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - fixed "keme -f" command on DISCONTIGMEM kernels
+    - Fixed segmentation violation when using the wrong vmlinux
+
+  * New upstream version 4.0-4.2 (see
+    http://people.redhat.com/anderson/crash.changelog)
+    - Added support for 2.6.22 kernels
+    - account for case when number of pgdata nodes < nr_cpus
+    - implement support for ia64 dom0/HV kdump dumpfile support
+    - add --no_panic command line option to skip panic-task search
+    - new "ps -r" command
+    - implement CLEANUP extenson commands for "help -e"
+    - implement new symbol_value_module() lookup for extensions
+
+ -- Troy Heber <troyh@debian.org>  Tue, 17 Jul 2007 12:40:37 -0600
+
 crash (4.0-4.1-2) unstable; urgency=low
 
   * Added patch to support 2.6.22 kernels where task_struct.thread_info was

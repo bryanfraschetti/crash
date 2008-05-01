@@ -1,7 +1,7 @@
 /* ppc64.c -- core analysis suite
  *
- * Copyright (C) 2004, 2005, 2006 David Anderson
- * Copyright (C) 2004, 2005, 2006 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  * Copyright (C) 2004, 2006 Haren Myneni, IBM Corporation
  *
  * This program is free software; you can redistribute it and/or modify
@@ -160,7 +160,8 @@ ppc64_init(int when)
 				m->l2_index_size = PMD_INDEX_SIZE_L4_64K;
 				m->l3_index_size = PUD_INDEX_SIZE_L4_64K;
 				m->l4_index_size = PGD_INDEX_SIZE_L4_64K;
-				m->pte_shift = PTE_SHIFT_L4_64K; 
+				m->pte_shift = symbol_exists("demote_segment_4k") ?
+					PTE_SHIFT_L4_64K_V2 : PTE_SHIFT_L4_64K_V1; 
 				m->l2_masked_bits = PMD_MASKED_BITS_64K;
 			} else {
 				/* 4K pagesize */
@@ -305,7 +306,7 @@ ppc64_get_stacktop(ulong task)
 void
 ppc64_dump_machdep_table(ulong arg)
 {
-        int others; 
+        int i, c, others; 
  
         others = 0;
         fprintf(fp, "              flags: %lx (", machdep->flags);
@@ -368,10 +369,41 @@ ppc64_dump_machdep_table(ulong arg)
         fprintf(fp, "   max_physmem_bits: %ld\n", machdep->max_physmem_bits);
         fprintf(fp, "  sections_per_root: %ld\n", machdep->sections_per_root);
 	fprintf(fp, "           machspec: %lx\n", (ulong)machdep->machspec);
-	fprintf(fp, "     pgd_index_size: %d\n", machdep->machspec->l4_index_size);
-	fprintf(fp, "     pud_index_size: %d\n", machdep->machspec->l3_index_size);
-	fprintf(fp, "     pmd_index_size: %d\n", machdep->machspec->l2_index_size);
-	fprintf(fp, "     pte_index_size: %d\n", machdep->machspec->l1_index_size);
+	fprintf(fp, "     hwintrstack[%d]: ", NR_CPUS);
+       	for (c = 0; c < NR_CPUS; c++) {
+		for (others = 0, i = c; i < NR_CPUS; i++) {
+			if (machdep->machspec->hwintrstack[i])
+				others++;
+		}
+		if (!others) {
+			fprintf(fp, "%s%s", 
+			        c && ((c % 4) == 0) ? "\n  " : "",
+				c ? "(remainder unused)" : "(unused)");
+			break;
+		}
+
+		fprintf(fp, "%s%016lx ", 
+			((c % 4) == 0) ? "\n  " : "",
+			machdep->machspec->hwintrstack[c]);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "           hwstackbuf: %lx\n", (ulong)machdep->machspec->hwstackbuf);
+	fprintf(fp, "          hwstacksize: %d\n", machdep->machspec->hwstacksize);
+	fprintf(fp, "               level4: %lx\n", (ulong)machdep->machspec->level4);
+	fprintf(fp, "     last_level4_read: %lx\n", (ulong)machdep->machspec->last_level4_read);
+	fprintf(fp, "        l4_index_size: %d\n", machdep->machspec->l4_index_size);
+	fprintf(fp, "        l3_index_size: %d\n", machdep->machspec->l3_index_size);
+	fprintf(fp, "        l2_index_size: %d\n", machdep->machspec->l2_index_size);
+	fprintf(fp, "        l1_index_size: %d\n", machdep->machspec->l1_index_size);
+	fprintf(fp, "          ptrs_per_l3: %d\n", machdep->machspec->ptrs_per_l3);
+	fprintf(fp, "          ptrs_per_l2: %d\n", machdep->machspec->ptrs_per_l2);
+	fprintf(fp, "          ptrs_per_l1: %d\n", machdep->machspec->ptrs_per_l1);
+	fprintf(fp, "             l4_shift: %d\n", machdep->machspec->l4_shift);
+	fprintf(fp, "             l3_shift: %d\n", machdep->machspec->l3_shift);
+	fprintf(fp, "             l2_shift: %d\n", machdep->machspec->l2_shift);
+	fprintf(fp, "             l1_shift: %d\n", machdep->machspec->l1_shift);
+	fprintf(fp, "            pte_shift: %d\n", machdep->machspec->pte_shift);
+	fprintf(fp, "       l2_masked_bits: %x\n", machdep->machspec->l2_masked_bits);
 }
 
 /*
@@ -2107,7 +2139,7 @@ ppc64_display_machine_stats(void)
                 fprintf(fp, "(unknown)\n");
         fprintf(fp, "                 HZ: %d\n", machdep->hz);
         fprintf(fp, "          PAGE SIZE: %d\n", PAGESIZE());
-        fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
+//      fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
         fprintf(fp, "KERNEL VIRTUAL BASE: %lx\n", machdep->kvbase);
         fprintf(fp, "KERNEL VMALLOC BASE: %lx\n", vt->vmalloc_start);
         fprintf(fp, "  KERNEL STACK SIZE: %ld\n", STACKSIZE());
@@ -2335,17 +2367,21 @@ parse_cmdline_arg(void)
 static void
 ppc64_paca_init(void)
 {
-#define BITS_FOR_LONG sizeof(ulong)*8
 	int i, cpus, nr_paca;
 	char *cpu_paca_buf;
 	ulong data_offset;
-	ulong cpu_online_map[NR_CPUS/BITS_FOR_LONG];
+	int map;
 
 	if (!symbol_exists("paca"))
 		error(FATAL, "PPC64: Could not find 'paca' symbol\n");
 
-	if (!symbol_exists("cpu_online_map"))
-		error(FATAL, "PPC64: Could not find 'cpu_online_map' symbol\n");
+	if (symbol_exists("cpu_present_map"))
+		map = PRESENT;
+	else if (symbol_exists("cpu_online_map"))
+		map = ONLINE;
+	else
+		error(FATAL, 
+		    "PPC64: cannot find 'cpu_present_map' or 'cpu_online_map' symbols\n");
 
 	if (!MEMBER_EXISTS("paca_struct", "data_offset"))
 		return;
@@ -2365,15 +2401,11 @@ ppc64_paca_init(void)
 		error(FATAL, "Recompile crash with larger NR_CPUS\n");
 	}
 	
-	readmem(symbol_value("cpu_online_map"), KVADDR, &cpu_online_map[0],
-		nr_paca/8, "cpu_online_map", FAULT_ON_ERROR);
-
 	for (i = cpus = 0; i < nr_paca; i++) {
-		div_t val = div(i, BITS_FOR_LONG);
 		/*
-		 * CPU online?
+		 * CPU present (or online)?
 		 */
-		if (!(cpu_online_map[val.quot] & (0x1UL << val.rem)))
+		if (!in_cpu_map(map, i))
 			continue;
 
         	readmem(symbol_value("paca") + (i * SIZE(ppc64_paca)),

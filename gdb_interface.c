@@ -251,7 +251,7 @@ retry:
         *  Patch gdb's symbol values with the correct values from either
         *  the System.map or non-debug vmlinux, whichever is in effect.
         */
-	if ((pc->flags & SYSMAP) || 
+	if ((pc->flags & SYSMAP) || (kt->flags & (RELOC_SET|RELOC_FORCE)) || 
 	    (pc->namelist_debug && !pc->debuginfo_file)) {
 		req->command = GNU_PATCH_SYMBOL_VALUES;
         	req->flags = GNU_RETURN_ON_ERROR;
@@ -647,7 +647,7 @@ static char *restricted_list[] = {
 };
 
 #define RESTRICTED_GDB_COMMAND \
-        "restricted gdb command: %s\n%s\"%s\" may only be used in a .gdbinit file or in a command file.\n%sThe .gdbinit file is read automatically during %s initialization.\n%sOther user-defined command files may be read interactively during\n%s%s runtime by using the gdb \"source\" command."
+        "restricted gdb command: %s\n%s\"%s\" may only be used in a .gdbinit file or in a command file.\n%sThe .gdbinit file is read automatically during %s initialization.\n%sOther user-defined command files may be read interactively during\n%s%s runtime by using the gdb \"source\" command.\n"
 
 static int
 is_restricted_command(char *cmd, ulong flags)

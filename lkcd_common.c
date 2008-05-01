@@ -64,7 +64,7 @@ fix_lkcd_address(ulonglong addr)
 
     for (i = 0; i < lkcd->fix_addr_num; i++) {
 	if ( (addr >=lkcd->fix_addr[i].task) && 
-		(addr <= lkcd->fix_addr[i].task + STACKSIZE())){
+		(addr < lkcd->fix_addr[i].task + STACKSIZE())){
 
 	    offset = addr - lkcd->fix_addr[i].task;
 	    addr = lkcd->fix_addr[i].saddr + offset;
@@ -708,14 +708,15 @@ retry:
 		if (lkcd->zones[ii].start == zone) {
 			if (lkcd->zones[ii].pages[page].offset != 0) {
 			   if (lkcd->zones[ii].pages[page].offset != off) {
-				error(INFO, "conflicting page: zone %lld, "
+				if (CRASHDEBUG(1))
+				    error(INFO, "LKCD: conflicting page: zone %lld, "
 					"page %lld: %lld, %lld != %lld\n",
 					(unsigned long long)zone, 
 					(unsigned long long)page, 
 					(unsigned long long)paddr, 
 					(unsigned long long)off,
 					(unsigned long long)lkcd->zones[ii].pages[page].offset);
-			  	abort();
+				return -1;
 			   }
 			   ret = 0;
 			} else {
@@ -786,6 +787,27 @@ get_offset(uint64_t paddr)
 	return 0;
 }
 
+
+#ifdef IA64
+
+int
+lkcd_get_kernel_start(ulong *addr)
+{
+	if (!addr)
+		return 0;
+
+	switch (lkcd->version)
+	{
+        case LKCD_DUMP_V8:
+        case LKCD_DUMP_V9:
+		return lkcd_get_kernel_start_v8(addr);
+
+	default:
+		return 0;
+	}
+}
+
+#endif
 
 
 int
@@ -1244,7 +1266,7 @@ lkcd_uncompress_gzip(unsigned char *dest, ulong destlen,
 	unsigned char *source, ulong sourcelen)
 {
         ulong retlen = destlen;
-        int rc;
+        int rc = FALSE;
 
 	switch (uncompress(dest, &retlen, source, sourcelen)) 
 	{
@@ -1398,6 +1420,18 @@ lkcd_dumpfile_complaint(uint32_t realpages, uint32_t dh_num_pages, int retval)
 "\n\nWARNING: This dumpfile contains fewer pages than the amount indicated\n"
 "         in the dumpfile header.  This is indicative of a failure during\n"
 "         the creation of the dumpfile during boot.\n\n");
+	}
+}
+
+int
+get_lkcd_regs_for_cpu(struct bt_info *bt, ulong *eip, ulong *esp)
+{
+	switch (lkcd->version) {
+	case LKCD_DUMP_V8:
+	case LKCD_DUMP_V9:
+		return get_lkcd_regs_for_cpu_v8(bt, eip, esp);
+	default:
+		return -1;
 	}
 }
 

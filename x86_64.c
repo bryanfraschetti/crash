@@ -184,6 +184,12 @@ x86_64_init(int when)
 			machdep->machspec->modules_vaddr = MODULES_VADDR_2_6_11;
 			machdep->machspec->modules_end = MODULES_END_2_6_11;
 
+			/* 2.6.24 layout */
+			machdep->machspec->vmemmap_vaddr = VMEMMAP_VADDR_2_6_24;
+			machdep->machspec->vmemmap_end = VMEMMAP_END_2_6_24;
+			if (symbol_exists("vmemmap_populate"))
+				machdep->flags |= VMEMMAP;
+
 	        	machdep->uvtop = x86_64_uvtop_level4;
 			break;
 
@@ -248,8 +254,23 @@ x86_64_init(int when)
 		MEMBER_OFFSET_INIT(thread_struct_rip, "thread_struct", "rip");
 		MEMBER_OFFSET_INIT(thread_struct_rsp, "thread_struct", "rsp");
 		MEMBER_OFFSET_INIT(thread_struct_rsp0, "thread_struct", "rsp0");
+		if (INVALID_MEMBER(thread_struct_rip))
+			MEMBER_OFFSET_INIT(thread_struct_rip, "thread_struct", "ip");
+		if (INVALID_MEMBER(thread_struct_rsp))
+			MEMBER_OFFSET_INIT(thread_struct_rsp, "thread_struct", "sp");
+		if (INVALID_MEMBER(thread_struct_rsp0))
+			MEMBER_OFFSET_INIT(thread_struct_rsp0, "thread_struct", "sp0");
 		STRUCT_SIZE_INIT(tss_struct, "tss_struct");
 		MEMBER_OFFSET_INIT(tss_struct_ist, "tss_struct", "ist");
+		if (INVALID_MEMBER(tss_struct_ist)) {
+			long x86_tss_offset, ist_offset;
+			x86_tss_offset = MEMBER_OFFSET("tss_struct", "x86_tss");
+			ist_offset = MEMBER_OFFSET("x86_hw_tss", "ist");
+			if ((x86_tss_offset != INVALID_OFFSET) &&
+			    (ist_offset != INVALID_OFFSET))
+				ASSIGN_OFFSET(tss_struct_ist) = x86_tss_offset + 
+					ist_offset;
+		}
 		MEMBER_OFFSET_INIT(user_regs_struct_rip,
 			"user_regs_struct", "rip");
 		MEMBER_OFFSET_INIT(user_regs_struct_rsp,
@@ -266,11 +287,15 @@ x86_64_init(int when)
                 if ((machdep->machspec->irqstack = (char *)
 		    malloc(machdep->machspec->stkinfo.isize)) == NULL)
                         error(FATAL, "cannot malloc irqstack space.");
-               if (symbol_exists("irq_desc"))
-                        ARRAY_LENGTH_INIT(machdep->nr_irqs, irq_desc,
-                                "irq_desc", NULL, 0);
-                else
-                        machdep->nr_irqs = 224;  /* NR_IRQS (at least) */
+		if (symbol_exists("irq_desc")) {
+			if (LKCD_KERNTYPES())
+				ARRAY_LENGTH_INIT_ALT(machdep->nr_irqs,
+				    "irq_desc", "kernel_stat.irqs", NULL, 0);
+			else
+				ARRAY_LENGTH_INIT(machdep->nr_irqs, irq_desc,
+					"irq_desc", NULL, 0);
+		} else
+			machdep->nr_irqs = 224; /* NR_IRQS (at least) */
 		machdep->vmalloc_start = x86_64_vmalloc_start;
 		machdep->dump_irq = x86_64_dump_irq;
 		if (!machdep->hz) {
@@ -338,6 +363,8 @@ x86_64_dump_machdep_table(ulong arg)
 		fprintf(fp, "%sVM_XEN", others++ ? "|" : "");
 	if (machdep->flags & VM_XEN_RHEL4)
 		fprintf(fp, "%sVM_XEN_RHEL4", others++ ? "|" : "");
+	if (machdep->flags & VMEMMAP)
+		fprintf(fp, "%sVMEMMAP", others++ ? "|" : "");
 	if (machdep->flags & NO_TSS)
 		fprintf(fp, "%sNO_TSS", others++ ? "|" : "");
 	if (machdep->flags & SCHED_TEXT)
@@ -434,6 +461,10 @@ x86_64_dump_machdep_table(ulong arg)
 	fprintf(fp, "              vmalloc_end: %016lx\n", (ulong)ms->vmalloc_end);
 	fprintf(fp, "            modules_vaddr: %016lx\n", (ulong)ms->modules_vaddr);
 	fprintf(fp, "              modules_end: %016lx\n", (ulong)ms->modules_end);
+	fprintf(fp, "            vmemmap_vaddr: %016lx %s\n", (ulong)ms->vmemmap_vaddr,
+		machdep->flags & VMEMMAP ? "" : "(unused)");
+	fprintf(fp, "              vmemmap_end: %016lx %s\n", (ulong)ms->vmemmap_end,
+		machdep->flags & VMEMMAP ? "" : "(unused)");
 	fprintf(fp, "                phys_base: %lx\n", (ulong)ms->phys_base);
 	fprintf(fp, "                     pml4: %lx\n", (ulong)ms->pml4);
 	fprintf(fp, "           last_pml4_read: %lx\n", (ulong)ms->last_pml4_read);
@@ -521,14 +552,22 @@ x86_64_cpu_pda_init(void)
 
 	cpu_pda_buf = GETBUF(SIZE(x8664_pda));
 
-	if (symbol_exists("_cpu_pda")) {
-		if (!(nr_pda = get_array_length("_cpu_pda", NULL, 0)))
-			nr_pda = NR_CPUS;
-		_cpu_pda = TRUE;
+	if (LKCD_KERNTYPES()) {
+		if (symbol_exists("_cpu_pda"))
+			_cpu_pda = TRUE;
+		else
+ 			_cpu_pda = FALSE;
+		nr_pda = get_cpus_possible();
 	} else {
-		if (!(nr_pda = get_array_length("cpu_pda", NULL, 0)))
-			nr_pda = NR_CPUS;
-		_cpu_pda = FALSE;
+		if (symbol_exists("_cpu_pda")) {
+			if (!(nr_pda = get_array_length("_cpu_pda", NULL, 0)))
+				nr_pda = NR_CPUS;
+			_cpu_pda = TRUE;
+		} else {
+			if (!(nr_pda = get_array_length("cpu_pda", NULL, 0)))
+				nr_pda = NR_CPUS;
+			_cpu_pda = FALSE;
+		}
 	}
 
 	for (i = cpus = 0; i < nr_pda; i++) {
@@ -566,8 +605,8 @@ x86_64_cpu_pda_init(void)
 				i, level4_pgt, data_offset);
 	}
 
-
-	if ((i = get_array_length("boot_cpu_stack", NULL, 0))) {
+	if (!LKCD_KERNTYPES() &&
+	    (i = get_array_length("boot_cpu_stack", NULL, 0))) {
 		istacksize = i;
 	} else if ((sp = symbol_search("boot_cpu_stack")) &&
  	    (nsp = next_symbol(NULL, sp))) {
@@ -815,6 +854,8 @@ int
 x86_64_IS_VMALLOC_ADDR(ulong vaddr)
 {
 	return ((vaddr >= VMALLOC_START && vaddr <= VMALLOC_END) ||
+                ((machdep->flags & VMEMMAP) && 
+		 (vaddr >= VMEMMAP_VADDR && vaddr <= VMEMMAP_END)) ||
                 (vaddr >= MODULES_VADDR && vaddr <= MODULES_END));
 }
 
@@ -1360,6 +1401,10 @@ x86_64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbo
                 return FALSE;
 
 	if (XEN_HYPER_MODE()) {
+		if (XEN_VIRT_ADDR(kvaddr)) {
+			*paddr = kvaddr - XEN_VIRT_START + xen_phys_start();
+			return TRUE;
+		}
 		if (DIRECTMAP_VIRT_ADDR(kvaddr)) {
 			*paddr = kvaddr - DIRECTMAP_VIRT_START;
 			return TRUE;
@@ -3082,33 +3127,68 @@ x86_64_exception_frame(ulong flags, ulong kvaddr, char *local,
 			INVALID_OFFSET);
 		err |= ((ms->pto.r8 = MEMBER_OFFSET("pt_regs", "r8")) == 
 			INVALID_OFFSET);
-		err |= ((ms->pto.rax = MEMBER_OFFSET("pt_regs", "rax")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rbx = MEMBER_OFFSET("pt_regs", "rbx")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rcx = MEMBER_OFFSET("pt_regs", "rcx")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rdx = MEMBER_OFFSET("pt_regs", "rdx")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rsi = MEMBER_OFFSET("pt_regs", "rsi")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rdi = MEMBER_OFFSET("pt_regs", "rdi")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rip = MEMBER_OFFSET("pt_regs", "rip")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rsp = MEMBER_OFFSET("pt_regs", "rsp")) == 
-			INVALID_OFFSET);
 		err |= ((ms->pto.cs = MEMBER_OFFSET("pt_regs", "cs")) == 
 			INVALID_OFFSET);
 		err |= ((ms->pto.ss = MEMBER_OFFSET("pt_regs", "ss")) == 
 			INVALID_OFFSET);
-		err |= ((ms->pto.eflags = MEMBER_OFFSET("pt_regs", "eflags")) ==
-			INVALID_OFFSET);
-		err |= ((ms->pto.orig_rax = 
-			MEMBER_OFFSET("pt_regs", "orig_rax")) == 
-			INVALID_OFFSET);
-		err |= ((ms->pto.rbp = MEMBER_OFFSET("pt_regs", "rbp")) == 
-			INVALID_OFFSET);
+		/*
+		 *  x86/x86_64 merge changed traditional register names.
+		 */
+		if (((ms->pto.rbp = MEMBER_OFFSET("pt_regs", "rbp")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rbp = MEMBER_OFFSET("pt_regs", "bp")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rax = MEMBER_OFFSET("pt_regs", "rax")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rax = MEMBER_OFFSET("pt_regs", "ax")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rbx = MEMBER_OFFSET("pt_regs", "rbx")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rbx = MEMBER_OFFSET("pt_regs", "bx")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rcx = MEMBER_OFFSET("pt_regs", "rcx")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rcx = MEMBER_OFFSET("pt_regs", "cx")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rdx = MEMBER_OFFSET("pt_regs", "rdx")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rdx = MEMBER_OFFSET("pt_regs", "dx")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rsi = MEMBER_OFFSET("pt_regs", "rsi")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rsi = MEMBER_OFFSET("pt_regs", "si")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rdi = MEMBER_OFFSET("pt_regs", "rdi")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rdi = MEMBER_OFFSET("pt_regs", "di")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rip = MEMBER_OFFSET("pt_regs", "rip")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rip = MEMBER_OFFSET("pt_regs", "ip")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.rsp = MEMBER_OFFSET("pt_regs", "rsp")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.rsp = MEMBER_OFFSET("pt_regs", "sp")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.eflags = MEMBER_OFFSET("pt_regs", "eflags")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.eflags = MEMBER_OFFSET("pt_regs", "flags")) == 
+		    INVALID_OFFSET))
+			err++; 
+		if (((ms->pto.orig_rax = MEMBER_OFFSET("pt_regs", "orig_rax")) == 
+		    INVALID_OFFSET) &&
+		    ((ms->pto.orig_rax = MEMBER_OFFSET("pt_regs", "orig_ax")) == 
+		    INVALID_OFFSET))
+			err++; 
 
 		if (err)
 			error(WARNING, "pt_regs structure has changed\n");
@@ -3415,6 +3495,14 @@ next_stack:
 	     i < (bt->stacktop - bt->stackbase)/sizeof(ulong); i++, up++) {
                 sym = closest_symbol(*up);
 		if (XEN_CORE_DUMPFILE()) {
+			if (STREQ(sym, "crash_kexec")) {
+				sp = x86_64_function_called_by((*up)-5);
+				if (sp && STREQ(sp->name, "machine_kexec")) {
+					*rip = *up;
+					*rsp = bt->stackbase + ((char *)(up) - bt->stackbuf);
+					return;
+				}
+			}
 			if (STREQ(sym, "xen_machine_kexec")) {
                        		*rip = *up;
                        		*rsp = bt->stackbase + ((char *)(up) - bt->stackbuf);
@@ -3427,6 +3515,14 @@ next_stack:
 		    STREQ(sym, "crash_kexec") ||
 		    STREQ(sym, "machine_kexec") ||
 		    STREQ(sym, "try_crashdump")) {
+			if (STREQ(sym, "crash_kexec")) {
+				sp = x86_64_function_called_by((*up)-5);
+				if (sp && STREQ(sp->name, "machine_kexec")) {
+					*rip = *up;
+					*rsp = bt->stackbase + ((char *)(up) - bt->stackbuf);
+					return;
+				}
+			}
 			/*
 			 *  Use second instance of crash_kexec if it exists.
 			 */
@@ -3656,7 +3752,7 @@ x86_64_dump_irq(int irq)
                 return(generic_dump_irq(irq));
         }
 
-        error(FATAL, "ia64_dump_irq: irq_desc[] does not exist?\n");
+        error(FATAL, "x86_64_dump_irq: irq_desc[] does not exist?\n");
 }
 
 /* 
@@ -3827,14 +3923,22 @@ x86_64_get_smp_cpus(void)
 
 	cpu_pda_buf = GETBUF(SIZE(x8664_pda));
 
-	if (symbol_exists("_cpu_pda")) {
-		if (!(nr_pda = get_array_length("_cpu_pda", NULL, 0)))
-        	       nr_pda = NR_CPUS;
-		_cpu_pda = TRUE;
+	if (LKCD_KERNTYPES()) {
+		if (symbol_exists("_cpu_pda"))
+ 			_cpu_pda = TRUE;
+		else
+	 		_cpu_pda = FALSE;
+		nr_pda = get_cpus_possible();
 	} else {
-		if (!(nr_pda = get_array_length("cpu_pda", NULL, 0)))
-        	       nr_pda = NR_CPUS;
-		_cpu_pda = FALSE;
+		if (symbol_exists("_cpu_pda")) {
+			if (!(nr_pda = get_array_length("_cpu_pda", NULL, 0)))
+				nr_pda = NR_CPUS;
+			_cpu_pda = TRUE;
+		} else {
+			if (!(nr_pda = get_array_length("cpu_pda", NULL, 0)))
+				nr_pda = NR_CPUS;
+			_cpu_pda = FALSE;
+		}
 	}
 	for (i = cpus = 0; i < nr_pda; i++) {
 		if (_cpu_pda) {
@@ -3913,9 +4017,11 @@ x86_64_display_machine_stats(void)
                 fprintf(fp, "(unknown)\n");
         fprintf(fp, "                 HZ: %d\n", machdep->hz);
         fprintf(fp, "          PAGE SIZE: %d\n", PAGESIZE());
-        fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
+//      fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
         fprintf(fp, "KERNEL VIRTUAL BASE: %lx\n", machdep->kvbase);
         fprintf(fp, "KERNEL VMALLOC BASE: %lx\n", vt->vmalloc_start);
+	if (machdep->flags & VMEMMAP)
+        	fprintf(fp, "KERNEL VMEMMAP BASE: %lx\n", machdep->machspec->vmemmap_vaddr);
 	fprintf(fp, "   KERNEL START MAP: %lx\n", __START_KERNEL_map);
         fprintf(fp, "KERNEL MODULES BASE: %lx\n", MODULES_VADDR);
         fprintf(fp, "  KERNEL STACK SIZE: %ld\n", STACKSIZE());
@@ -4287,126 +4393,6 @@ x86_64_irq_eframe_link_init(void)
 #include "netdump.h"
 
 /*
- *  Determine the physical address base for relocatable kernels.
- */
-static void
-x86_64_calc_phys_base(void)
-{
-	int i;
-	FILE *iomem;
-	char buf[BUFSIZE];
-	char *p1;
-	ulong phys_base, text_start, kernel_code_start;
-	int errflag;
-	struct vmcore_data *vd;
-	Elf64_Phdr *phdr;
-
-	if (machdep->flags & PHYS_BASE)     /* --machdep override */
-		return;
-
-	machdep->machspec->phys_base = 0;   /* default/traditional */
-
-	if (!kernel_symbol_exists("phys_base"))
-		return;
-
-	if (!symbol_exists("_text"))
-		return;
-	else
-		text_start = symbol_value("_text");
-
-	if (ACTIVE()) {
-	        if ((iomem = fopen("/proc/iomem", "r")) == NULL)
-	                return;
-	
-		errflag = 1;
-	        while (fgets(buf, BUFSIZE, iomem)) {
-			if (strstr(buf, ": Kernel code")) {
-				clean_line(buf);
-				errflag = 0;
-				break;
-			}
-		}
-	        fclose(iomem);
-	
-		if (errflag)
-			return;
-	
-		if (!(p1 = strstr(buf, "-")))
-			return;
-		else
-			*p1 = NULLCHAR;
-	
-		errflag = 0;
-		kernel_code_start = htol(buf, RETURN_ON_ERROR|QUIET, &errflag);
-	        if (errflag)
-			return;
-	
-		machdep->machspec->phys_base = kernel_code_start -
-			(text_start - __START_KERNEL_map);
-	
-		if (CRASHDEBUG(1)) {
-			fprintf(fp, "_text: %lx  ", text_start);
-			fprintf(fp, "Kernel code: %lx -> ", kernel_code_start);
-			fprintf(fp, "phys_base: %lx\n\n", 
-				machdep->machspec->phys_base);
-		}
-
-		return;
-	}
-
-	/*
-	 *  Get relocation value from whatever dumpfile format is being used.
-	 */
-
-	if (DISKDUMP_DUMPFILE()) {
-		if (diskdump_phys_base(&phys_base)) {
-			machdep->machspec->phys_base = phys_base;
-			if (CRASHDEBUG(1))
-				fprintf(fp, "compressed kdump: phys_base: %lx\n",
-					phys_base);
-		}
-		return;
-	}
-
-	if ((vd = get_kdump_vmcore_data())) {
-                for (i = 0; i < vd->num_pt_load_segments; i++) {
-			phdr = vd->load64 + i;
-			if ((phdr->p_vaddr >= __START_KERNEL_map) &&
-			    !(IS_VMALLOC_ADDR(phdr->p_vaddr))) {
-
-				machdep->machspec->phys_base = phdr->p_paddr - 
-				    (phdr->p_vaddr & ~(__START_KERNEL_map));
-
-				if (CRASHDEBUG(1)) {
-					fprintf(fp, "p_vaddr: %lx p_paddr: %lx -> ",
-						phdr->p_vaddr, phdr->p_paddr);
-					fprintf(fp, "phys_base: %lx\n\n", 
-						machdep->machspec->phys_base);
-				}
-				break;
-			}
-		}
-
-		return;
-	}
-
-	if (XENDUMP_DUMPFILE() && (text_start == __START_KERNEL_map)) {
-		/* 
-		 *  Xen kernels are not relocable (yet) and don't have the
-		 *  "phys_base" entry point, so this must be a xendump of a 
-		 *  fully-virtualized relocatable kernel.  No clues exist in 
-		 *  the xendump header, so hardwire phys_base to 2MB and hope
-		 *  for the best.
-		 */
-		machdep->machspec->phys_base = 0x200000;
-		if (CRASHDEBUG(1))
-			fprintf(fp, 
-			    "default relocatable default phys_base: %lx\n",
-				machdep->machspec->phys_base);
-	}
-}
-
-/*
  *  From the xen vmcore, create an index of mfns for each page that makes
  *  up the dom0 kernel's complete phys_to_machine_mapping[max_pfn] array.
  */
@@ -4664,6 +4650,154 @@ x86_64_xen_kdump_page_mfn(ulong kvaddr)
 }
 
 #include "xendump.h"
+
+/*
+ *  Determine the physical address base for relocatable kernels.
+ */
+static void
+x86_64_calc_phys_base(void)
+{
+	int i;
+	FILE *iomem;
+	char buf[BUFSIZE];
+	char *p1;
+	ulong phys_base, text_start, kernel_code_start;
+	int errflag;
+	struct vmcore_data *vd;
+	static struct xendump_data *xd;
+	Elf64_Phdr *phdr;
+
+	if (machdep->flags & PHYS_BASE)     /* --machdep override */
+		return;
+
+	machdep->machspec->phys_base = 0;   /* default/traditional */
+
+	if (!kernel_symbol_exists("phys_base"))
+		return;
+
+	if (!symbol_exists("_text"))
+		return;
+	else
+		text_start = symbol_value("_text");
+
+	if (ACTIVE()) {
+	        if ((iomem = fopen("/proc/iomem", "r")) == NULL)
+	                return;
+	
+		errflag = 1;
+	        while (fgets(buf, BUFSIZE, iomem)) {
+			if (strstr(buf, ": Kernel code")) {
+				clean_line(buf);
+				errflag = 0;
+				break;
+			}
+		}
+	        fclose(iomem);
+	
+		if (errflag)
+			return;
+	
+		if (!(p1 = strstr(buf, "-")))
+			return;
+		else
+			*p1 = NULLCHAR;
+	
+		errflag = 0;
+		kernel_code_start = htol(buf, RETURN_ON_ERROR|QUIET, &errflag);
+	        if (errflag)
+			return;
+	
+		machdep->machspec->phys_base = kernel_code_start -
+			(text_start - __START_KERNEL_map);
+	
+		if (CRASHDEBUG(1)) {
+			fprintf(fp, "_text: %lx  ", text_start);
+			fprintf(fp, "Kernel code: %lx -> ", kernel_code_start);
+			fprintf(fp, "phys_base: %lx\n\n", 
+				machdep->machspec->phys_base);
+		}
+
+		return;
+	}
+
+	/*
+	 *  Get relocation value from whatever dumpfile format is being used.
+	 */
+
+	if (DISKDUMP_DUMPFILE()) {
+		if (diskdump_phys_base(&phys_base)) {
+			machdep->machspec->phys_base = phys_base;
+			if (CRASHDEBUG(1))
+				fprintf(fp, "compressed kdump: phys_base: %lx\n",
+					phys_base);
+		}
+		return;
+	}
+
+	if ((vd = get_kdump_vmcore_data())) {
+                for (i = 0; i < vd->num_pt_load_segments; i++) {
+			phdr = vd->load64 + i;
+			if ((phdr->p_vaddr >= __START_KERNEL_map) &&
+			    !(IS_VMALLOC_ADDR(phdr->p_vaddr))) {
+
+				machdep->machspec->phys_base = phdr->p_paddr - 
+				    (phdr->p_vaddr & ~(__START_KERNEL_map));
+
+				if (CRASHDEBUG(1)) {
+					fprintf(fp, "p_vaddr: %lx p_paddr: %lx -> ",
+						phdr->p_vaddr, phdr->p_paddr);
+					fprintf(fp, "phys_base: %lx\n\n", 
+						machdep->machspec->phys_base);
+				}
+				break;
+			}
+		}
+
+		return;
+	}
+
+	if ((xd = get_xendump_data())) {
+		if (text_start == __START_KERNEL_map) {
+		       /* 
+			*  Xen kernels are not relocable (yet) and don't have
+			*  the "phys_base" entry point, so this is most likely 
+			*  a xendump of a fully-virtualized relocatable kernel.
+			*  No clues exist in the xendump header, so hardwire 
+			*  phys_base to 2MB and hope for the best.
+			*/
+			machdep->machspec->phys_base = 0x200000;
+			if (CRASHDEBUG(1))
+				fprintf(fp, 
+			    	    "default relocatable phys_base: %lx\n",
+					machdep->machspec->phys_base);
+
+		} else if (text_start > __START_KERNEL_map) {
+			switch (xd->flags & (XC_CORE_ELF|XC_CORE_NO_P2M)) 	
+			{
+			/*
+			 *  If this is a new ELF-style xendump with no
+			 *  p2m information, then it also must be a
+			 *  fully-virtualized relocatable kernel.  Again,
+			 *  the xendump header is useless, and we don't
+			 *  have /proc/iomem, so presume that the kernel 
+			 *  code starts at 2MB.
+			 */ 
+			case (XC_CORE_ELF|XC_CORE_NO_P2M):
+				machdep->machspec->phys_base = 0x200000 - 
+					(text_start - __START_KERNEL_map);
+				if (CRASHDEBUG(1))
+					fprintf(fp, "default relocatable " 
+			    	            "phys_base: %lx\n",
+						machdep->machspec->phys_base);
+				break;
+
+			default:
+				break;
+			}
+		}
+	}
+}
+
 
 /*
  *  Create an index of mfns for each page that makes up the
@@ -5397,7 +5531,7 @@ x86_64_init_hyper(int when)
 	case POST_GDB:
 		XEN_HYPER_STRUCT_SIZE_INIT(cpuinfo_x86, "cpuinfo_x86");
 		XEN_HYPER_STRUCT_SIZE_INIT(tss_struct, "tss_struct");
-		XEN_HYPER_MEMBER_OFFSET_INIT(tss_struct_rsp0, "tss_struct", "rsp0");
+		XEN_HYPER_ASSIGN_OFFSET(tss_struct_rsp0) = MEMBER_OFFSET("tss_struct", "__blh") + sizeof(short unsigned int);
 		XEN_HYPER_MEMBER_OFFSET_INIT(tss_struct_ist, "tss_struct", "ist");
 		if (symbol_exists("cpu_data")) {
 			xht->cpu_data_address = symbol_value("cpu_data");

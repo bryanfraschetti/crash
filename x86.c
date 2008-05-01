@@ -1,8 +1,8 @@
 /* x86.c - core analysis suite
  *
  * Portions Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1009,22 +1009,22 @@ static void x86_init_hyper(int);
 static ulong x86_get_stackbase_hyper(ulong);
 static ulong x86_get_stacktop_hyper(ulong);
 
-static int INT_EFRAME_SS = 14;
-static int INT_EFRAME_ESP = 13;
-static int INT_EFRAME_EFLAGS = 12;   /* CS lcall7 */
-static int INT_EFRAME_CS = 11;       /* EIP lcall7 */
-static int INT_EFRAME_EIP = 10;      /* EFLAGS lcall7 */
-static int INT_EFRAME_ERR = 9;
-static int INT_EFRAME_ES = 8;
-static int INT_EFRAME_DS = 7;
-static int INT_EFRAME_EAX = 6;
-static int INT_EFRAME_EBP = 5;
-static int INT_EFRAME_EDI = 4;
-static int INT_EFRAME_ESI = 3;
-static int INT_EFRAME_EDX = 2;
-static int INT_EFRAME_ECX = 1;
-static int INT_EFRAME_EBX = 0;
-static int INT_EFRAME_GS = -1;
+int INT_EFRAME_SS = 14;
+int INT_EFRAME_ESP = 13;
+int INT_EFRAME_EFLAGS = 12;   /* CS lcall7 */
+int INT_EFRAME_CS = 11;       /* EIP lcall7 */
+int INT_EFRAME_EIP = 10;      /* EFLAGS lcall7 */
+int INT_EFRAME_ERR = 9;
+int INT_EFRAME_ES = 8;
+int INT_EFRAME_DS = 7;
+int INT_EFRAME_EAX = 6;
+int INT_EFRAME_EBP = 5;
+int INT_EFRAME_EDI = 4;
+int INT_EFRAME_ESI = 3;
+int INT_EFRAME_EDX = 2;
+int INT_EFRAME_ECX = 1;
+int INT_EFRAME_EBX = 0;
+int INT_EFRAME_GS = -1;
 
 #define MAX_USER_EFRAME_SIZE   (16)
 #define KERNEL_EFRAME_SIZE (INT_EFRAME_EFLAGS+1)
@@ -1777,6 +1777,27 @@ x86_init(int when)
 			"user_regs_struct", "ebp");
 		MEMBER_OFFSET_INIT(user_regs_struct_esp,
 			"user_regs_struct", "esp");
+		if (!VALID_STRUCT(user_regs_struct)) {
+			/*  Use this hardwired version -- sometimes the 
+			 *  debuginfo doesn't pick this up even though
+			 *  it exists in the kernel; it shouldn't change.
+			 */
+			struct x86_user_regs_struct {
+			        long ebx, ecx, edx, esi, edi, ebp, eax;
+			        unsigned short ds, __ds, es, __es;
+			        unsigned short fs, __fs, gs, __gs;
+			        long orig_eax, eip;
+			        unsigned short cs, __cs;
+			        long eflags, esp;
+			        unsigned short ss, __ss;
+			};
+			ASSIGN_SIZE(user_regs_struct) = 
+				sizeof(struct x86_user_regs_struct);
+			ASSIGN_OFFSET(user_regs_struct_ebp) =
+				offsetof(struct x86_user_regs_struct, ebp);
+			ASSIGN_OFFSET(user_regs_struct_esp) =
+				offsetof(struct x86_user_regs_struct, esp);
+		}
 		MEMBER_OFFSET_INIT(thread_struct_cr3, "thread_struct", "cr3");
 		STRUCT_SIZE_INIT(cpuinfo_x86, "cpuinfo_x86");
 		STRUCT_SIZE_INIT(e820map, "e820map");
@@ -1852,23 +1873,43 @@ eframe_init(void)
 		return;
 	}
 
-	INT_EFRAME_SS = MEMBER_OFFSET("pt_regs", "xss") / 4; 
-	INT_EFRAME_ESP = MEMBER_OFFSET("pt_regs", "esp") / 4;
-	INT_EFRAME_EFLAGS = MEMBER_OFFSET("pt_regs", "eflags") / 4;
-	INT_EFRAME_CS = MEMBER_OFFSET("pt_regs", "xcs") / 4;
-	INT_EFRAME_EIP = MEMBER_OFFSET("pt_regs", "eip") / 4;
-	INT_EFRAME_ERR = MEMBER_OFFSET("pt_regs", "orig_eax") / 4;
-	if ((INT_EFRAME_GS = MEMBER_OFFSET("pt_regs", "xgs")) != -1)
-		INT_EFRAME_GS /= 4;
-	INT_EFRAME_ES = MEMBER_OFFSET("pt_regs", "xes") / 4;
-	INT_EFRAME_DS = MEMBER_OFFSET("pt_regs", "xds") / 4;
-	INT_EFRAME_EAX = MEMBER_OFFSET("pt_regs", "eax") / 4;
-	INT_EFRAME_EBP = MEMBER_OFFSET("pt_regs", "ebp") / 4;
-	INT_EFRAME_EDI = MEMBER_OFFSET("pt_regs", "edi") / 4;
-	INT_EFRAME_ESI = MEMBER_OFFSET("pt_regs", "esi") / 4;
-	INT_EFRAME_EDX = MEMBER_OFFSET("pt_regs", "edx") / 4;
-	INT_EFRAME_ECX = MEMBER_OFFSET("pt_regs", "ecx") / 4;
-	INT_EFRAME_EBX = MEMBER_OFFSET("pt_regs", "ebx") / 4;
+	if (MEMBER_EXISTS("pt_regs", "esp")) {
+		INT_EFRAME_SS = MEMBER_OFFSET("pt_regs", "xss") / 4; 
+		INT_EFRAME_ESP = MEMBER_OFFSET("pt_regs", "esp") / 4;
+		INT_EFRAME_EFLAGS = MEMBER_OFFSET("pt_regs", "eflags") / 4;
+		INT_EFRAME_CS = MEMBER_OFFSET("pt_regs", "xcs") / 4;
+		INT_EFRAME_EIP = MEMBER_OFFSET("pt_regs", "eip") / 4;
+		INT_EFRAME_ERR = MEMBER_OFFSET("pt_regs", "orig_eax") / 4;
+		if ((INT_EFRAME_GS = MEMBER_OFFSET("pt_regs", "xgs")) != -1)
+			INT_EFRAME_GS /= 4;
+		INT_EFRAME_ES = MEMBER_OFFSET("pt_regs", "xes") / 4;
+		INT_EFRAME_DS = MEMBER_OFFSET("pt_regs", "xds") / 4;
+		INT_EFRAME_EAX = MEMBER_OFFSET("pt_regs", "eax") / 4;
+		INT_EFRAME_EBP = MEMBER_OFFSET("pt_regs", "ebp") / 4;
+		INT_EFRAME_EDI = MEMBER_OFFSET("pt_regs", "edi") / 4;
+		INT_EFRAME_ESI = MEMBER_OFFSET("pt_regs", "esi") / 4;
+		INT_EFRAME_EDX = MEMBER_OFFSET("pt_regs", "edx") / 4;
+		INT_EFRAME_ECX = MEMBER_OFFSET("pt_regs", "ecx") / 4;
+		INT_EFRAME_EBX = MEMBER_OFFSET("pt_regs", "ebx") / 4;
+	} else {
+		INT_EFRAME_SS = MEMBER_OFFSET("pt_regs", "ss") / 4; 
+		INT_EFRAME_ESP = MEMBER_OFFSET("pt_regs", "sp") / 4;
+		INT_EFRAME_EFLAGS = MEMBER_OFFSET("pt_regs", "flags") / 4;
+		INT_EFRAME_CS = MEMBER_OFFSET("pt_regs", "cs") / 4;
+		INT_EFRAME_EIP = MEMBER_OFFSET("pt_regs", "ip") / 4;
+		INT_EFRAME_ERR = MEMBER_OFFSET("pt_regs", "orig_ax") / 4;
+		if ((INT_EFRAME_GS = MEMBER_OFFSET("pt_regs", "gs")) != -1)
+			INT_EFRAME_GS /= 4;
+		INT_EFRAME_ES = MEMBER_OFFSET("pt_regs", "es") / 4;
+		INT_EFRAME_DS = MEMBER_OFFSET("pt_regs", "ds") / 4;
+		INT_EFRAME_EAX = MEMBER_OFFSET("pt_regs", "ax") / 4;
+		INT_EFRAME_EBP = MEMBER_OFFSET("pt_regs", "bp") / 4;
+		INT_EFRAME_EDI = MEMBER_OFFSET("pt_regs", "di") / 4;
+		INT_EFRAME_ESI = MEMBER_OFFSET("pt_regs", "si") / 4;
+		INT_EFRAME_EDX = MEMBER_OFFSET("pt_regs", "dx") / 4;
+		INT_EFRAME_ECX = MEMBER_OFFSET("pt_regs", "cx") / 4;
+		INT_EFRAME_EBX = MEMBER_OFFSET("pt_regs", "bx") / 4;
+	}
 }
 
 /*
@@ -2805,7 +2846,10 @@ x86_kvtop_PAE(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verb
 			*paddr = kvaddr - DIRECTMAP_VIRT_START;
 			return TRUE;
 		}
-		pgd = (ulonglong *)symbol_value("idle_pg_table_l3");
+		if (symbol_exists("idle_pg_table_l3"))
+			pgd = (ulonglong *)symbol_value("idle_pg_table_l3");
+		else
+			pgd = (ulonglong *)symbol_value("idle_pg_table");
 	} else {
 		if (!vt->vmalloc_start) {
 			*paddr = VTOP(kvaddr);
@@ -3136,6 +3180,7 @@ x86_dump_machdep_table(ulong arg)
 {
         int others;
 	ulong xen_wpt;
+	char buf[BUFSIZE];
 
 	switch (arg) {
 	default:
@@ -3218,6 +3263,40 @@ x86_dump_machdep_table(ulong arg)
 	fprintf(fp, "   get_xendump_regs: x86_get_xendump_regs()\n");
 	fprintf(fp, "xen_kdump_p2m_create: x86_xen_kdump_p2m_create()\n");
 	fprintf(fp, "clear_machdep_cache: x86_clear_machdep_cache()\n");
+	fprintf(fp, "   INT_EFRAME_[reg]:\n");
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "SS: "), INT_EFRAME_SS);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "ESP: "), INT_EFRAME_ESP);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EFLAGS: "), INT_EFRAME_EFLAGS);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "CS: "), INT_EFRAME_CS);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "IP: "), INT_EFRAME_EIP);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "ERR: "), INT_EFRAME_ERR);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "ES: "), INT_EFRAME_ES);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "DS: "), INT_EFRAME_DS);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EAX: "), INT_EFRAME_EAX);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EBP: "), INT_EFRAME_EBP);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EDI: "), INT_EFRAME_EDI);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "ESI: "), INT_EFRAME_ESI);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EDX: "), INT_EFRAME_EDX);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "ECX: "), INT_EFRAME_ECX);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "EBX: "), INT_EFRAME_EBX);
+	fprintf(fp, "%s %d\n", 
+		mkstring(buf, 21, RJUST, "GS: "), INT_EFRAME_GS);
+
         fprintf(fp, "           machspec: x86_machine_specific\n");
 	fprintf(fp, "                     idt_table: %lx\n",
 		(ulong)machdep->machspec->idt_table); 
@@ -3858,7 +3937,7 @@ x86_display_machine_stats(void)
 		fprintf(fp, "(unknown)\n");
 	fprintf(fp, "                 HZ: %d\n", machdep->hz);
 	fprintf(fp, "          PAGE SIZE: %d\n", PAGESIZE());
-	fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
+//	fprintf(fp, "      L1 CACHE SIZE: %d\n", l1_cache_size());
 	fprintf(fp, "KERNEL VIRTUAL BASE: %lx\n", machdep->kvbase);
 	fprintf(fp, "KERNEL VMALLOC BASE: %lx\n", vt->vmalloc_start);
 	fprintf(fp, "  KERNEL STACK SIZE: %ld\n", STACKSIZE());
@@ -4141,9 +4220,9 @@ x86_xen_kdump_p2m_create(struct xen_kdump_data *xkd)
 		
 	        if (CRASHDEBUG(7)) {
 	                up = (ulong *)xkd->page;
-	                for (i = 0; i < 256; i++) {
+	                for (j = 0; j < 256; j++) {
 	                        fprintf(fp, "%08lx: %08lx %08lx %08lx %08lx\n",
-	                                (ulong)((i * 4) * sizeof(ulong)),
+	                                (ulong)((j * 4) * sizeof(ulong)),
 	                                *up, *(up+1), *(up+2), *(up+3));
 	                        up += 4;
 	                }
@@ -4889,7 +4968,8 @@ x86_init_hyper(int when)
 		break;
 
 	case PRE_GDB:
-		if (symbol_exists("idle_pg_table_l3")) {
+		if (symbol_exists("create_pae_xen_mappings") ||
+		    symbol_exists("idle_pg_table_l3")) {
                 	machdep->flags |= PAE;
 			PGDIR_SHIFT = PGDIR_SHIFT_3LEVEL;
 			PTRS_PER_PTE = PTRS_PER_PTE_3LEVEL;

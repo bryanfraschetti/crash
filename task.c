@@ -1,8 +1,8 @@
 /* task.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,12 +28,16 @@ static void refresh_pidhash_task_table(void);
 static void refresh_pid_hash_task_table(void);
 static void refresh_hlist_task_table(void);
 static void refresh_hlist_task_table_v2(void);
+static void refresh_hlist_task_table_v3(void);
+static void refresh_active_task_table(void);
 static struct task_context *store_context(struct task_context *, ulong, char *);
 static void refresh_context(ulong, ulong);
 static void parent_list(ulong);
 static void child_list(ulong);
+static void initialize_task_state(void);
 static void show_task_times(struct task_context *, ulong);
 static void show_task_args(struct task_context *);
+static void show_task_rlimit(struct task_context *);
 static void show_tgid_list(ulong);
 static int compare_start_time(const void *, const void *);
 static int start_time_timespec(void);
@@ -49,6 +53,15 @@ static long cpu_idx(int);
 static void dump_runq(void);
 static void dump_runqueues(void);
 static void dump_prio_array(int, ulong, char *);
+struct rb_root;
+static struct rb_node *rb_first(struct rb_root *);
+struct rb_node;
+static struct rb_node *rb_next(struct rb_node *);
+static struct rb_node *rb_parent(struct rb_node *, struct rb_node *);
+static struct rb_node *rb_right(struct rb_node *, struct rb_node *);
+static struct rb_node *rb_left(struct rb_node *, struct rb_node *);
+static void dump_CFS_runqueues(void);
+static void dump_RT_prio_array(int, ulong, char *);
 static void task_struct_member(struct task_context *,ulong,struct reference *);
 static void signal_reference(struct task_context *, ulong, struct reference *);
 static void do_sig_thread_group(ulong);
@@ -142,6 +155,15 @@ task_init(void)
 			"thread_struct", "eip");
 		esp_offset = MEMBER_OFFSET_INIT(thread_struct_esp,
 			"thread_struct", "esp");
+		/*
+		 *  Handle x86/x86_64 merger.
+		 */
+		if (eip_offset == INVALID_OFFSET)
+			eip_offset = MEMBER_OFFSET_INIT(thread_struct_eip,
+				"thread_struct", "ip");
+		if (esp_offset == INVALID_OFFSET)
+			esp_offset = MEMBER_OFFSET_INIT(thread_struct_esp,
+				"thread_struct", "sp");
 		ksp_offset = MEMBER_OFFSET_INIT(thread_struct_ksp,
 			"thread_struct", "ksp");
 	        ASSIGN_OFFSET(task_struct_thread_eip) = 
@@ -160,8 +182,15 @@ task_init(void)
 		get_idle_threads(&tt->idle_threads[0], kt->cpus);
 	}
 
-        MEMBER_OFFSET_INIT(task_struct_thread_info, "task_struct", 
-		"thread_info");
+	if (MEMBER_EXISTS("task_struct", "thread_info"))
+        	MEMBER_OFFSET_INIT(task_struct_thread_info, "task_struct", 
+			"thread_info");
+	else if (MEMBER_EXISTS("task_struct", "stack"))
+        	MEMBER_OFFSET_INIT(task_struct_thread_info, "task_struct", 
+			"stack");
+	else
+		ASSIGN_OFFSET(task_struct_thread_info) = INVALID_OFFSET;
+
 	if (VALID_MEMBER(task_struct_thread_info)) {
         	MEMBER_OFFSET_INIT(thread_info_task, "thread_info", "task"); 
         	MEMBER_OFFSET_INIT(thread_info_cpu, "thread_info", "cpu");
@@ -179,6 +208,9 @@ task_init(void)
         MEMBER_OFFSET_INIT(task_struct_processor, "task_struct", "processor");
         MEMBER_OFFSET_INIT(task_struct_p_pptr, "task_struct", "p_pptr");
         MEMBER_OFFSET_INIT(task_struct_parent, "task_struct", "parent");
+	if (INVALID_MEMBER(task_struct_parent))
+		MEMBER_OFFSET_INIT(task_struct_parent, "task_struct", 
+			"real_parent");
         MEMBER_OFFSET_INIT(task_struct_has_cpu, "task_struct", "has_cpu");
         MEMBER_OFFSET_INIT(task_struct_cpus_runnable,  
 		"task_struct", "cpus_runnable");
@@ -193,8 +225,13 @@ task_init(void)
         MEMBER_OFFSET_INIT(task_struct_pids, "task_struct", "pids");
         MEMBER_OFFSET_INIT(task_struct_last_run, "task_struct", "last_run");
         MEMBER_OFFSET_INIT(task_struct_timestamp, "task_struct", "timestamp");
+        MEMBER_OFFSET_INIT(task_struct_sched_info, "task_struct", "sched_info");
+	if (VALID_MEMBER(task_struct_sched_info))
+		MEMBER_OFFSET_INIT(sched_info_last_arrival, 
+			"sched_info", "last_arrival");
 	if (VALID_MEMBER(task_struct_last_run) || 
-	    VALID_MEMBER(task_struct_timestamp)) {
+	    VALID_MEMBER(task_struct_timestamp) ||
+	    VALID_MEMBER(sched_info_last_arrival)) {
 		char buf[BUFSIZE];
 	        strcpy(buf, "alias last ps -l");
         	alias_init(buf);
@@ -203,6 +240,15 @@ task_init(void)
 	MEMBER_OFFSET_INIT(pid_hash_chain, "pid", "hash_chain");
 
 	STRUCT_SIZE_INIT(pid_link, "pid_link");
+	STRUCT_SIZE_INIT(upid, "upid");
+	if (VALID_STRUCT(upid)) {
+		MEMBER_OFFSET_INIT(upid_nr, "upid", "nr");
+		MEMBER_OFFSET_INIT(upid_ns, "upid", "ns"); 
+		MEMBER_OFFSET_INIT(upid_pid_chain, "upid", "pid_chain");
+		MEMBER_OFFSET_INIT(pid_numbers, "pid", "numbers");
+		MEMBER_OFFSET_INIT(pid_tasks, "pid", "tasks");
+		tt->init_pid_ns = symbol_value("init_pid_ns");
+	}
 
 	MEMBER_OFFSET_INIT(pid_pid_chain, "pid", "pid_chain");
 
@@ -315,11 +361,33 @@ task_init(void)
                 	tt->refresh_task_table = refresh_pid_hash_task_table;
 		} else {
                 	tt->pidhash_addr = symbol_value("pid_hash");
-			if (!get_array_length("pid_hash", NULL, sizeof(void *)) &&
-			    VALID_STRUCT(pid_link))
-                		tt->refresh_task_table = refresh_hlist_task_table_v2;
-			else
-                		tt->refresh_task_table = refresh_hlist_task_table;
+			if (LKCD_KERNTYPES()) {
+				if (VALID_STRUCT(pid_link)) {
+					if (VALID_STRUCT(upid) && VALID_MEMBER(pid_numbers))
+						tt->refresh_task_table =
+							refresh_hlist_task_table_v3;
+					else
+						tt->refresh_task_table =
+							refresh_hlist_task_table_v2;
+ 				} else
+					tt->refresh_task_table =
+						refresh_hlist_task_table;
+				builtin_array_length("pid_hash",
+					tt->pidhash_len, NULL);
+			} else {
+				if (!get_array_length("pid_hash", NULL,
+				    sizeof(void *)) && VALID_STRUCT(pid_link)) {
+					if (VALID_STRUCT(upid) && VALID_MEMBER(pid_numbers))
+						tt->refresh_task_table =
+							refresh_hlist_task_table_v3;
+					else
+						tt->refresh_task_table =
+							refresh_hlist_task_table_v2;
+				}
+				else
+                			tt->refresh_task_table =
+						refresh_hlist_task_table;
+			}
 		}
 
                 tt->flags |= PID_HASH;
@@ -360,6 +428,10 @@ task_init(void)
 		irqstacks_init();
 
 	get_active_set();
+
+	if (tt->flags & ACTIVE_ONLY)
+		tt->refresh_task_table = refresh_active_task_table;
+
 	tt->refresh_task_table(); 
 
 	if (tt->flags & TASK_REFRESH_OFF) 
@@ -377,6 +449,9 @@ task_init(void)
 	}
 
 	sort_context_array();
+
+	if (pc->flags & SILENT)
+		initialize_task_state();
 
 	tt->flags |= TASK_INIT_DONE;
 }
@@ -1680,6 +1755,368 @@ retry_pid_hash:
 
 
 /*
+ *  2.6.24: The pid_hash[] hlist_head entries were changed to point 
+ *  to the hlist_node structure embedded in a upid structure. 
+ */
+static void
+refresh_hlist_task_table_v3(void)
+{
+	int i;
+	ulong *pid_hash;
+	ulong pidhash_array;
+	ulong kpp;
+	char *tp; 
+	ulong next, pnext, pprev;
+	ulong upid;
+	char *nodebuf;
+	int len, cnt;
+        struct task_context *tc;
+        ulong curtask;
+        ulong curpid;
+        ulong retries;
+	ulong *tlp;
+	uint upid_nr;
+	ulong upid_ns;
+	int chained;
+	ulong pid;
+	ulong pid_tasks_0;
+
+        if (DUMPFILE() && (tt->flags & TASK_INIT_DONE))   /* impossible */
+                return;
+
+        if (DUMPFILE()) {                                 /* impossible */
+		please_wait("gathering task table data");
+                if (!symbol_exists("panic_threads"))
+                        tt->flags |= POPULATE_PANIC;
+        }
+
+        if (ACTIVE() && !(tt->flags & TASK_REFRESH))
+                return;
+
+        /*
+         *  The current task's task_context entry may change,
+         *  or the task may not even exist anymore.
+         */
+        if (ACTIVE() && (tt->flags & TASK_INIT_DONE)) {
+                curtask = CURRENT_TASK();
+                curpid = CURRENT_PID();
+        }
+
+	get_symbol_data("pid_hash", sizeof(void *), &pidhash_array);
+
+	len = tt->pidhash_len;
+	pid_hash = (ulong *)GETBUF(len * SIZE(hlist_head));
+	nodebuf = GETBUF(SIZE(upid));
+        retries = 0;
+
+retry_pid_hash:
+	if (retries && DUMPFILE())
+		error(FATAL,
+			"\ncannot gather a stable task list via pid_hash\n");
+
+        if ((retries == MAX_UNLIMITED_TASK_RETRIES) &&
+            !(tt->flags & TASK_INIT_DONE)) 
+                error(FATAL, 
+	       "\ncannot gather a stable task list via pid_hash (%d retries)\n",
+			retries);
+
+        if (!readmem(pidhash_array, KVADDR, pid_hash, 
+	    len * SIZE(hlist_head), "pid_hash contents", RETURN_ON_ERROR)) 
+		error(FATAL, "\ncannot read pid_hash array\n");
+
+        if (!hq_open()) {
+                error(INFO, "cannot hash task_struct entries\n");
+                if (!(tt->flags & TASK_INIT_DONE))
+                        clean_exit(1);
+                error(INFO, "using stale task_structs\n");
+                FREEBUF(pid_hash);
+                return;
+        }
+
+	/*
+	 *  Get the idle threads first. 
+	 */
+	cnt = 0;
+	for (i = 0; i < kt->cpus; i++) {
+		if (hq_enter(tt->idle_threads[i]))
+			cnt++;
+		else
+			error(WARNING, "%sduplicate idle tasks?\n",
+				DUMPFILE() ? "\n" : "");
+	}
+
+	for (i = 0; i < len; i++) {
+		if (!pid_hash[i])
+			continue;
+
+		kpp = pid_hash[i];
+		upid = pid_hash[i] - OFFSET(upid_pid_chain);
+		chained = 0;
+do_chained:
+        	if (!readmem(upid, KVADDR, nodebuf, SIZE(upid), 
+		    "pid_hash upid", RETURN_ON_ERROR|QUIET)) { 
+			error(INFO, "\ncannot read pid_hash upid\n");
+                        if (DUMPFILE())
+                                continue;
+                        hq_close();
+                        retries++;
+                        goto retry_pid_hash;
+		}
+
+		pnext = ULONG(nodebuf + OFFSET(upid_pid_chain) + OFFSET(hlist_node_next));
+		pprev = ULONG(nodebuf + OFFSET(upid_pid_chain) + OFFSET(hlist_node_pprev));
+		upid_nr = UINT(nodebuf + OFFSET(upid_nr));
+		upid_ns = ULONG(nodebuf + OFFSET(upid_ns));
+		/*
+		 *  Use init_pid_ns level 0 (PIDTYPE_PID).
+		 */
+		if (upid_ns != tt->init_pid_ns)
+			continue;
+
+		pid = upid - OFFSET(pid_numbers);
+
+		if (!readmem(pid + OFFSET(pid_tasks), KVADDR, &pid_tasks_0, 
+		    sizeof(void *), "pid tasks", RETURN_ON_ERROR|QUIET)) {
+                        error(INFO, "\ncannot read pid.tasks[0]\n");
+                        if (DUMPFILE())
+                                continue;
+                        hq_close();
+                        retries++;
+                        goto retry_pid_hash;
+                }
+
+		if (pid_tasks_0 == 0)
+			continue;
+
+		next = pid_tasks_0 - OFFSET(task_struct_pids);
+
+		if (CRASHDEBUG(1)) {
+			if (chained)
+				console("                %lx upid: %lx nr: %d pid: %lx\n" 
+				    "                pnext/pprev: %.*lx/%lx task: %lx\n",
+				    kpp, upid, upid_nr, pid, VADDR_PRLEN, pnext, pprev, next);
+			else
+				console("pid_hash[%4d]: %lx upid: %lx nr: %d pid: %lx\n"
+				    "                pnext/pprev: %.*lx/%lx task: %lx\n",
+				    i, kpp, upid, upid_nr, pid, VADDR_PRLEN, pnext, pprev, next);
+		}
+
+		if (!IS_TASK_ADDR(next)) {
+ 			error(INFO, "%sinvalid task address in pid_hash: %lx\n",
+                        	DUMPFILE() ? "\n" : "", next);
+			 if (DUMPFILE())
+                                        break;
+ 			hq_close();
+ 			retries++;
+ 			goto retry_pid_hash;
+		}
+
+		if (!is_idle_thread(next) && !hq_enter(next)) {
+			error(INFO, "%sduplicate task in pid_hash: %lx\n",
+				DUMPFILE() ? "\n" : "", next);
+			if (DUMPFILE())
+				break;
+			hq_close();
+			retries++;
+			goto retry_pid_hash;
+		}
+
+		cnt++;
+
+		if (pnext) {
+			kpp = pnext;
+			upid = pnext - OFFSET(upid_pid_chain);
+			chained++;
+			goto do_chained;
+		}
+	}
+
+        if (cnt > tt->max_tasks) {
+                tt->max_tasks = cnt + TASK_SLUSH;
+                allocate_task_space(tt->max_tasks);
+                hq_close();
+                if (!DUMPFILE())
+                        retries++;
+                goto retry_pid_hash;
+        }
+
+        BZERO(tt->task_local, tt->max_tasks * sizeof(void *));
+        cnt = retrieve_list((ulong *)tt->task_local, cnt);
+
+	hq_close();
+
+	clear_task_cache();
+
+        for (i = 0, tlp = (ulong *)tt->task_local, 
+             tt->running_tasks = 0, tc = tt->context_array;
+             i < tt->max_tasks; i++, tlp++) {
+		if (!(*tlp))
+			continue;
+
+		if (!IS_TASK_ADDR(*tlp)) {
+			error(WARNING, 
+		            "%sinvalid task address found in task list: %lx\n", 
+				DUMPFILE() ? "\n" : "", *tlp);
+			if (DUMPFILE()) 
+				continue;
+			retries++;
+			goto retry_pid_hash;
+		}	
+	
+		if (task_exists(*tlp)) {
+			error(WARNING, 
+		           "%sduplicate task address found in task list: %lx\n",
+				DUMPFILE() ? "\n" : "", *tlp);
+			if (DUMPFILE())
+				continue;
+			retries++;
+			goto retry_pid_hash;
+		}
+
+		if (!(tp = fill_task_struct(*tlp))) {
+                        if (DUMPFILE())
+                                continue;
+                        retries++;
+                        goto retry_pid_hash;
+                }
+
+		if (store_context(tc, *tlp, tp)) {
+			tc++;
+			tt->running_tasks++;
+		}
+	}
+
+        FREEBUF(pid_hash);
+	FREEBUF(nodebuf);
+
+	please_wait_done();
+
+        if (ACTIVE() && (tt->flags & TASK_INIT_DONE)) 
+		refresh_context(curtask, curpid);
+
+	tt->retries = MAX(tt->retries, retries);
+}
+
+static void
+refresh_active_task_table(void)
+{
+	int i;
+	char *tp; 
+	int cnt;
+        struct task_context *tc;
+        ulong curtask;
+        ulong curpid;
+        ulong retries;
+	ulong *tlp;
+
+        if (DUMPFILE() && (tt->flags & TASK_INIT_DONE))   /* impossible */
+                return;
+
+        if (DUMPFILE()) { 
+		please_wait("gathering task table data");
+                if (!symbol_exists("panic_threads"))
+                        tt->flags |= POPULATE_PANIC;
+        }
+
+        if (ACTIVE() && !(tt->flags & TASK_REFRESH))
+                return;
+
+	get_active_set();
+       	/*
+       	 *  The current task's task_context entry may change,
+         *  or the task may not even exist anymore.
+         */
+       	if (ACTIVE() && (tt->flags & TASK_INIT_DONE)) {
+               	curtask = CURRENT_TASK();
+               	curpid = CURRENT_PID();
+       	}
+
+retry_active:
+
+        if (!hq_open()) {
+                error(INFO, "cannot hash task_struct entries\n");
+                if (!(tt->flags & TASK_INIT_DONE))
+                        clean_exit(1);
+                error(INFO, "using stale task_structs\n");
+                return;
+        }
+
+	/*
+	 *  Get the active tasks. 
+	 */
+	cnt = 0;
+	for (i = 0; i < kt->cpus; i++) {
+		if (hq_enter(tt->active_set[i]))
+			cnt++;
+		else
+			error(WARNING, "%sduplicate active tasks?\n",
+				DUMPFILE() ? "\n" : "");
+	}
+
+        BZERO(tt->task_local, tt->max_tasks * sizeof(void *));
+        cnt = retrieve_list((ulong *)tt->task_local, cnt);
+
+	hq_close();
+
+	clear_task_cache();
+
+        for (i = 0, tlp = (ulong *)tt->task_local, 
+             tt->running_tasks = 0, tc = tt->context_array;
+             i < tt->max_tasks; i++, tlp++) {
+		if (!(*tlp))
+			continue;
+
+		if (!IS_TASK_ADDR(*tlp)) {
+			error(WARNING, 
+		            "%sinvalid task address found in task list: %lx\n", 
+				DUMPFILE() ? "\n" : "", *tlp);
+			if (DUMPFILE()) 
+				continue;
+			retries++;
+			goto retry_active;
+		}	
+	
+		if (task_exists(*tlp)) {
+			error(WARNING, 
+		           "%sduplicate task address found in task list: %lx\n",
+				DUMPFILE() ? "\n" : "", *tlp);
+			if (DUMPFILE())
+				continue;
+			retries++;
+			goto retry_active;
+		}
+
+		if (!(tp = fill_task_struct(*tlp))) {
+                        if (DUMPFILE())
+                                continue;
+                        retries++;
+                        goto retry_active;
+                }
+
+		if (store_context(tc, *tlp, tp)) {
+			tc++;
+			tt->running_tasks++;
+		} else if (DUMPFILE())
+			error(WARNING, "corrupt/invalid active task: %lx\n",
+				*tlp);
+	}
+
+	if (!tt->running_tasks) {
+		if (DUMPFILE())
+			error(FATAL, "cannot determine any active tasks!\n");
+		retries++;
+		goto retry_active;
+	}
+
+	please_wait_done();
+
+        if (ACTIVE() && (tt->flags & TASK_INIT_DONE))
+		refresh_context(curtask, curpid);
+
+	tt->retries = MAX(tt->retries, retries);
+}
+
+/*
  *  Fill a task_context structure with the data from a task.  If a NULL
  *  task_context pointer is passed in, use the next available one.
  */
@@ -1698,7 +2135,13 @@ store_context(struct task_context *tc, ulong task, char *tp)
 		do_verify = 1;
 	else if (tt->refresh_task_table == refresh_pid_hash_task_table)
 		do_verify = 2;
+	else if (tt->refresh_task_table == refresh_hlist_task_table)
+		do_verify = 2;
 	else if (tt->refresh_task_table == refresh_hlist_task_table_v2)
+		do_verify = 2;
+	else if (tt->refresh_task_table == refresh_hlist_task_table_v3)
+		do_verify = 2;
+	else if (tt->refresh_task_table == refresh_active_task_table)
 		do_verify = 2;
 	else
 		do_verify = 0;
@@ -2173,7 +2616,7 @@ cmd_ps(void)
 	BZERO(&psinfo, sizeof(struct psinfo));
 	flag = 0;
 
-        while ((c = getopt(argcnt, args, "gstcpkula")) != EOF) {
+        while ((c = getopt(argcnt, args, "gstcpkular")) != EOF) {
                 switch(c)
 		{
 		case 'k':
@@ -2216,9 +2659,10 @@ cmd_ps(void)
 			
 		case 'l':
 			if (INVALID_MEMBER(task_struct_last_run) &&
-			    INVALID_MEMBER(task_struct_timestamp)) {
+			    INVALID_MEMBER(task_struct_timestamp) &&
+			    INVALID_MEMBER(sched_info_last_arrival)) {
 				error(INFO, 
-"neither task_struct.last_run nor task_struct.timestamp exist in this kernel\n");
+                            "last-run timestamps do not exist in this kernel\n");
 				argerrs++;
 				break;
 			}
@@ -2228,6 +2672,11 @@ cmd_ps(void)
 
 		case 's':
 			flag |= PS_KSTACKP;
+			break;
+
+		case 'r':
+			flag &= ~(PS_EXCLUSIVE);
+			flag |= PS_RLIMIT;
 			break;
 
 		default:
@@ -2312,6 +2761,10 @@ cmd_ps(void)
         }                                                             \
         if (flag & PS_ARGV_ENVP) {                                    \
                 show_task_args(tc);                                   \
+                continue;                                             \
+        }                                                             \
+        if (flag & PS_RLIMIT) {                                       \
+                show_task_rlimit(tc);                                 \
                 continue;                                             \
         }                                                             \
         if (flag & PS_TGID_LIST) {                                    \
@@ -2558,6 +3011,120 @@ show_task_args(struct task_context *tc)
 
 bailout:
 	FREEBUF(buf);
+}
+
+char *rlim_names[] = {
+	/* 0 */	 "CPU",  
+	/* 1 */  "FSIZE",
+	/* 2 */  "DATA",
+	/* 3 */  "STACK",
+	/* 4 */  "CORE",
+	/* 5 */  "RSS",
+	/* 6 */  "NPROC",
+	/* 7 */  "NOFILE",
+	/* 8 */  "MEMLOCK",
+	/* 9 */  "AS",
+	/* 10 */ "LOCKS",
+	/* 11 */ "SIGPENDING",
+	/* 12 */ "MSGQUEUE",
+	/* 13 */ "NICE",
+	/* 14 */ "RTPRIO",
+	NULL,
+};
+
+#ifndef RLIM_INFINITY
+#define RLIM_INFINITY (~0UL)
+#endif
+
+/*
+ *  Show the current and maximum rlimit values.
+ */
+static void
+show_task_rlimit(struct task_context *tc)
+{
+	int i, j, len1, len2, rlimit_index;
+	int in_task_struct, in_signal_struct;
+	char *rlimit_buffer;
+	ulong *p1, rlim_addr;
+	char buf1[BUFSIZE];
+	char buf2[BUFSIZE];
+	char buf3[BUFSIZE];
+
+	if (!VALID_MEMBER(task_struct_rlim) && !VALID_MEMBER(signal_struct_rlim)) {
+		MEMBER_OFFSET_INIT(task_struct_rlim, "task_struct", "rlim");
+		MEMBER_OFFSET_INIT(signal_struct_rlim, "signal_struct", "rlim");
+		STRUCT_SIZE_INIT(rlimit, "rlimit");
+		if (!VALID_MEMBER(task_struct_rlim) && 
+	  	    !VALID_MEMBER(signal_struct_rlim))
+			error(FATAL, "cannot determine rlimit array location\n");
+	} else if (!VALID_STRUCT(rlimit))
+		error(FATAL, "cannot determine rlimit structure definition\n");
+
+	in_task_struct = in_signal_struct = FALSE;
+
+	if (VALID_MEMBER(task_struct_rlim)) {
+		rlimit_index = get_array_length("task_struct.rlim", NULL, 0);
+		in_task_struct = TRUE;
+	} else if (VALID_MEMBER(signal_struct_rlim)) {
+		if (!VALID_MEMBER(task_struct_signal))
+			error(FATAL, "cannot determine rlimit array location\n");
+		rlimit_index = get_array_length("signal_struct.rlim", NULL, 0);
+		in_signal_struct = TRUE;
+	}
+
+	if (!rlimit_index)
+		error(FATAL, "cannot determine rlimit array size\n");
+
+	for (i = len1 = 0; i < rlimit_index; i++) {
+		if ((j = strlen(rlim_names[i])) > len1)
+			len1 = j;
+	}
+	len2 = strlen("(unlimited)");
+
+	rlimit_buffer = GETBUF(rlimit_index * SIZE(rlimit));
+
+	print_task_header(fp, tc, 0);
+
+	fill_task_struct(tc->task);
+
+	if (in_task_struct) {
+		BCOPY(tt->task_struct + OFFSET(task_struct_rlim),
+			rlimit_buffer, rlimit_index * SIZE(rlimit));
+	} else if (in_signal_struct) {
+		rlim_addr = ULONG(tt->task_struct + OFFSET(task_struct_signal));
+        	if (!readmem(rlim_addr + OFFSET(signal_struct_rlim), 
+		    KVADDR, rlimit_buffer, rlimit_index * SIZE(rlimit),
+                    "signal_struct rlimit array", RETURN_ON_ERROR)) {
+			FREEBUF(rlimit_buffer);
+			return;
+		}
+	}
+	
+	fprintf(fp, "  %s   %s   %s\n",
+		mkstring(buf1, len1, RJUST, "RLIMIT"),
+		mkstring(buf2, len2, CENTER|RJUST, "CURRENT"),
+		mkstring(buf3, len2, CENTER|RJUST, "MAXIMUM"));
+		
+	for (p1 = (ulong *)rlimit_buffer, i = 0; i < rlimit_index; i++) {
+		fprintf(fp, "  %s   ", mkstring(buf1, len1, RJUST, 
+			rlim_names[i] ? rlim_names[i] : "(unknown)"));
+		if (*p1 == (ulong)RLIM_INFINITY)
+			fprintf(fp, "(unlimited)   ");
+		else
+			fprintf(fp, "%s   ", mkstring(buf1, len2, 
+				CENTER|LJUST|LONG_DEC, MKSTR(*p1)));
+		p1++;
+		if (*p1 == (ulong)RLIM_INFINITY)
+			fprintf(fp, "(unlimited)\n");
+		else
+			fprintf(fp, "%s\n", mkstring(buf1, len2, 
+				CENTER|LJUST|LONG_DEC, MKSTR(*p1)));
+		p1++;
+	}
+
+	fprintf(fp, "\n");
+
+	FREEBUF(rlimit_buffer);
 }
 
 /*
@@ -3314,6 +3881,25 @@ str_to_context(char *string, ulong *value, struct task_context **tcp)
 
 
 /*
+ *  Return the task if the vaddr is part of a task's task_struct.
+ */
+ulong
+vaddr_in_task_struct(ulong vaddr)
+{
+        int i;
+        struct task_context *tc;
+
+        tc = FIRST_CONTEXT();
+        for (i = 0; i < RUNNING_TASKS(); i++, tc++) {
+		if ((vaddr >= tc->task) && 
+		    (vaddr < (tc->task + SIZE(task_struct))))
+                        return tc->task;
+        }
+
+	return NO_TASK;
+}
+
+/*
  *  Verify whether any task is running a command.
  */
 int
@@ -3459,7 +4045,8 @@ show_context(struct task_context *tc)
 			fprintf(fp, "(ACTIVE)");
 	}
 
-	if (!(pc->flags & RUNTIME) && (tt->flags & PANIC_TASK_NOT_FOUND) &&
+	if (!(pc->flags & RUNTIME) && !ACTIVE() && 
+	    (tt->flags & PANIC_TASK_NOT_FOUND) &&
 	    !SYSRQ_TASK(tc->task)) {
 		fprintf(fp, "\n"); INDENT(indent);
 		if (machine_type("S390") || machine_type("S390X"))
@@ -3515,6 +4102,10 @@ show_context(struct task_context *tc)
                		cnt++ ? "" : "\n", tc->comm);
 		break;
 	}
+
+	if (!(pc->flags & RUNTIME) && (tt->flags & ACTIVE_ONLY))
+		error(WARNING, 
+		    "\nonly the active tasks on each cpu are being tracked\n");
 }
 
 
@@ -3722,6 +4313,10 @@ task_last_run(ulong task)
 	} else if (VALID_MEMBER(task_struct_timestamp))
         	timestamp = tt->last_task_read ?  ULONGLONG(tt->task_struct + 
 			OFFSET(task_struct_timestamp)) : 0;
+	else if (VALID_MEMBER(sched_info_last_arrival))
+        	timestamp = tt->last_task_read ?  ULONGLONG(tt->task_struct + 
+			OFFSET(task_struct_sched_info) + 
+			OFFSET(sched_info_last_arrival)) : 0;
 	
         return timestamp;
 }
@@ -3892,6 +4487,12 @@ get_panic_context(void)
 	tt->panic_processor = -1;
 	task = NO_TASK;
         tc = FIRST_CONTEXT();
+
+	/* 
+	 *  --no_panic command line option
+	 */
+	if (tt->flags & PANIC_TASK_NOT_FOUND) 
+		goto use_task_0;
 
 	if (symbol_exists("panic_threads") &&
 	    symbol_exists("panicmsg") &&
@@ -4968,6 +5569,10 @@ dump_task_table(int verbose)
                 fprintf(fp, "refresh_hlist_task_table()\n");
         else if (tt->refresh_task_table == refresh_hlist_task_table_v2)
                 fprintf(fp, "refresh_hlist_task_table_v2()\n");
+        else if (tt->refresh_task_table == refresh_hlist_task_table_v3)
+                fprintf(fp, "refresh_hlist_task_table_v3()\n");
+        else if (tt->refresh_task_table == refresh_active_task_table)
+                fprintf(fp, "refresh_active_task_table()\n");
 	else
 		fprintf(fp, "%lx\n", (ulong)tt->refresh_task_table);
 
@@ -5016,6 +5621,9 @@ dump_task_table(int verbose)
         if (tt->flags & NO_TIMESPEC)
                 sprintf(&buf[strlen(buf)], 
 			"%sNO_TIMESPEC", others++ ? "|" : "");
+        if (tt->flags & ACTIVE_ONLY)
+                sprintf(&buf[strlen(buf)], 
+			"%sACTIVE_ONLY", others++ ? "|" : "");
 	sprintf(&buf[strlen(buf)], ")");
 
         if (strlen(buf) > 54)
@@ -5041,7 +5649,7 @@ dump_task_table(int verbose)
 	fprintf(fp, "      last_mm_read: %lx\n", tt->last_mm_read);
 	fprintf(fp, "       task_struct: %lx\n", (ulong)tt->task_struct);
 	fprintf(fp, "         mm_struct: %lx\n", (ulong)tt->mm_struct);
-
+	fprintf(fp, "       init_pid_ns: %lx\n", tt->init_pid_ns);
 
         fprintf(fp, "     panic_threads:");
 
@@ -5251,6 +5859,16 @@ get_idle_threads(ulong *tasklist, int nr_cpus)
 			cnt++;
 		else
                 	BZERO(tasklist, sizeof(ulong) * NR_CPUS);
+	} else if (OPENVZ()) {
+		runq = symbol_value("pcpu_info");
+		runqbuf = GETBUF(SIZE(pcpu_info));
+		for (i = 0; i < nr_cpus; i++, runq += SIZE(pcpu_info)) {
+			readmem(runq, KVADDR, runqbuf, SIZE(pcpu_info),
+				"pcpu info", FAULT_ON_ERROR);
+			tasklist[i] = ULONG(runqbuf + OFFSET(pcpu_info_idle));
+			if (IS_KVADDR(tasklist[i]))
+				cnt++;
+		}
 	}
 
 	if (runqbuf)
@@ -5344,14 +5962,38 @@ get_active_set(void)
 	} else if (symbol_exists("per_cpu__runqueues")) {
 		runq = symbol_value("per_cpu__runqueues");
 		per_cpu = TRUE;
-	} else
+	} else if (OPENVZ())
+		runq = symbol_value("pcpu_info");
+	else
 		return FALSE;
 
         BZERO(tt->active_set, sizeof(ulong) * NR_CPUS);
         runqbuf = GETBUF(SIZE(runqueue));
 	cnt = 0;
 
-	if (VALID_MEMBER(runqueue_curr) && per_cpu) {
+	if (OPENVZ()) {
+		ulong vcpu_struct; 
+		char *pcpu_info_buf, *vcpu_struct_buf;
+
+		pcpu_info_buf   = GETBUF(SIZE(pcpu_info));
+		vcpu_struct_buf = GETBUF(SIZE(vcpu_struct));
+
+		for (i = 0; i < kt->cpus; i++, runq += SIZE(pcpu_info)) {
+			readmem(runq, KVADDR, pcpu_info_buf, 
+				SIZE(pcpu_info), "pcpu_info", FAULT_ON_ERROR);
+			vcpu_struct= ULONG(pcpu_info_buf +
+				OFFSET(pcpu_info_vcpu));
+			readmem(vcpu_struct, KVADDR, vcpu_struct_buf, 
+				SIZE(vcpu_struct), "pcpu_info->vcpu",
+				FAULT_ON_ERROR);
+			tt->active_set[i] = ULONG(vcpu_struct_buf +
+				OFFSET(vcpu_struct_rq) + OFFSET(runqueue_curr));
+			if (IS_KVADDR(tt->active_set[i]))
+				cnt++;
+		}
+		FREEBUF(pcpu_info_buf);
+		FREEBUF(vcpu_struct_buf);
+	} else if (VALID_MEMBER(runqueue_curr) && per_cpu) {
                	for (i = 0; i < kt->cpus; i++) {
                         if ((kt->flags & SMP) && (kt->flags & PER_CPU_OFF)) {
                                 runq = symbol_value("per_cpu__runqueues") +
@@ -5369,7 +6011,8 @@ get_active_set(void)
 				cnt++;
 		}
 	} else if (VALID_MEMBER(runqueue_curr)) {
-	        for (i = 0; i < NR_CPUS; i++, runq += SIZE(runqueue)) {
+	        for (i = 0; i < MAX(kt->cpus, kt->kernel_NR_CPUS); i++, 
+		    runq += SIZE(runqueue)) {
 	                readmem(runq, KVADDR, runqbuf,
 	                	SIZE(runqueue), "(old) runqueues curr",
 	                        FAULT_ON_ERROR);
@@ -5683,6 +6326,11 @@ dump_runq(void)
 	ulong *tlist;
 	struct task_context *tc;
 
+	if (VALID_MEMBER(rq_cfs)) {
+		dump_CFS_runqueues();
+		return;
+	}
+ 
 	if (VALID_MEMBER(runqueue_arrays)) {
 		dump_runqueues();
 		return;
@@ -5843,6 +6491,252 @@ dump_prio_array(int which, ulong k_prio_array, char *u_prio_array)
 		hq_close();
 		console("%d entries\n", cnt);
         	tlist = (ulong *)GETBUF((cnt) * sizeof(ulong));
+		cnt = retrieve_list(tlist, cnt);
+		for (c = 0; c < cnt; c++) {
+			if (!(tc = task_to_context(tlist[c])))
+				continue;
+			if (c)
+				INDENT(8);
+			print_task_header(fp, tc, FALSE);
+		}
+		FREEBUF(tlist);
+	}
+}
+
+/*
+ *  CFS scheduler uses Red-Black trees to maintain run queue.
+ */
+struct rb_node
+{
+        unsigned long  rb_parent_color;
+#define RB_RED          0
+#define RB_BLACK        1
+        struct rb_node *rb_right;
+        struct rb_node *rb_left;
+};
+
+struct rb_root
+{
+        struct rb_node *rb_node;
+};
+
+static struct rb_node *
+rb_first(struct rb_root *root)
+{
+        struct rb_root rloc;
+        struct rb_node *n;
+	struct rb_node nloc;
+
+	readmem((ulong)root, KVADDR, &rloc, sizeof(struct rb_root), 
+		"rb_root", FAULT_ON_ERROR);
+
+        n = rloc.rb_node;
+        if (!n)
+                return NULL;
+        while (rb_left(n, &nloc))
+		n = nloc.rb_left;
+
+        return n;
+}
+
+static struct rb_node *
+rb_parent(struct rb_node *node, struct rb_node *nloc)
+{
+	readmem((ulong)node, KVADDR, nloc, sizeof(struct rb_node), 
+		"rb_node", FAULT_ON_ERROR);
+
+	return (struct rb_node *)(nloc->rb_parent_color & ~3);
+}
+
+static struct rb_node *
+rb_right(struct rb_node *node, struct rb_node *nloc)
+{
+	readmem((ulong)node, KVADDR, nloc, sizeof(struct rb_node), 
+		"rb_node", FAULT_ON_ERROR);
+
+	return nloc->rb_right;
+}
+
+static struct rb_node *
+rb_left(struct rb_node *node, struct rb_node *nloc)
+{
+	readmem((ulong)node, KVADDR, nloc, sizeof(struct rb_node), 
+		"rb_node", FAULT_ON_ERROR);
+
+	return nloc->rb_left;
+}
+
+static struct rb_node *
+rb_next(struct rb_node *node)
+{
+	struct rb_node nloc;
+        struct rb_node *parent;
+
+	parent = rb_parent(node, &nloc);
+
+	if (parent == node)
+		return NULL;
+
+        if (nloc.rb_right) {
+		node = nloc.rb_right;
+		while (rb_left(node, &nloc))
+			node = nloc.rb_left;
+		return node;
+	}
+
+        while ((parent = rb_parent(node, &nloc)) && (node == rb_right(parent, &nloc)))
+                node = parent;
+
+        return parent;
+}
+
+static void
+dump_CFS_runqueues(void)
+{
+	int cpu;
+	ulong runq, cfs_rq;
+	char *runqbuf, *cfs_rq_buf;
+	ulong leftmost, tasks_timeline;
+	struct task_context *tc;
+	long nr_running, cfs_rq_nr_running;
+	struct rb_root *root;
+	struct rb_node *node;
+
+	if (!VALID_STRUCT(cfs_rq)) {
+		STRUCT_SIZE_INIT(cfs_rq, "cfs_rq");
+		MEMBER_OFFSET_INIT(rq_rt, "rq", "rt");
+		MEMBER_OFFSET_INIT(rq_nr_running, "rq", "nr_running");
+		MEMBER_OFFSET_INIT(task_struct_se, "task_struct", "se");
+		MEMBER_OFFSET_INIT(sched_entity_run_node, "sched_entity", 
+			"run_node");
+		MEMBER_OFFSET_INIT(cfs_rq_rb_leftmost, "cfs_rq", "rb_leftmost");
+		MEMBER_OFFSET_INIT(cfs_rq_nr_running, "cfs_rq", "nr_running");
+		MEMBER_OFFSET_INIT(cfs_rq_tasks_timeline, "cfs_rq", 
+			"tasks_timeline");
+		MEMBER_OFFSET_INIT(rt_rq_active, "rt_rq", "active");
+                MEMBER_OFFSET_INIT(task_struct_run_list, "task_struct",
+                        "run_list");
+	}
+
+	if (!symbol_exists("per_cpu__runqueues"))
+		error(FATAL, "per_cpu__runqueues does not exist\n");
+
+        runq = symbol_value("per_cpu__runqueues");
+
+        runqbuf = GETBUF(SIZE(runqueue));
+	cfs_rq_buf = symbol_exists("per_cpu__init_cfs_rq") ?
+		GETBUF(SIZE(cfs_rq)) : NULL;
+
+        for (cpu = 0; cpu < kt->cpus; cpu++) {
+		if ((kt->flags & SMP) && (kt->flags & PER_CPU_OFF)) {
+			runq = symbol_value("per_cpu__runqueues") +
+				kt->__per_cpu_offset[cpu];
+		} else
+			runq = symbol_value("per_cpu__runqueues");
+
+                fprintf(fp, "RUNQUEUES[%d]: %lx\n", cpu, runq);
+                readmem(runq, KVADDR, runqbuf, SIZE(runqueue),
+                        "per-cpu rq", FAULT_ON_ERROR);
+
+		if (cfs_rq_buf) {
+			/*
+		 	 *  Use default task group's cfs_rq on each cpu.
+		 	 */
+			if ((kt->flags & SMP) && (kt->flags & PER_CPU_OFF)) {
+				cfs_rq = symbol_value("per_cpu__init_cfs_rq") +
+					kt->__per_cpu_offset[cpu];
+			} else
+				cfs_rq = symbol_value("per_cpu__init_cfs_rq");
+
+			readmem(cfs_rq, KVADDR, cfs_rq_buf, SIZE(cfs_rq),
+				"per-cpu cfs_rq", FAULT_ON_ERROR);
+	                leftmost = ULONG(cfs_rq_buf + OFFSET(cfs_rq_rb_leftmost));
+	                tasks_timeline = ULONG(cfs_rq_buf + 
+				OFFSET(cfs_rq_tasks_timeline));
+			nr_running = LONG(cfs_rq_buf + OFFSET(rq_nr_running));
+	                cfs_rq_nr_running = ULONG(cfs_rq_buf + 
+				OFFSET(cfs_rq_nr_running));
+			root = (struct rb_root *)(cfs_rq + 
+				OFFSET(cfs_rq_tasks_timeline));
+		} else {
+	                leftmost = ULONG(runqbuf + OFFSET(rq_cfs) + 
+				OFFSET(cfs_rq_rb_leftmost));
+	                tasks_timeline = ULONG(runqbuf + OFFSET(rq_cfs) + 
+				OFFSET(cfs_rq_tasks_timeline));
+			nr_running = LONG(runqbuf + OFFSET(rq_nr_running));
+	                cfs_rq_nr_running = ULONG(runqbuf + OFFSET(rq_cfs) + 
+				OFFSET(cfs_rq_nr_running));
+			root = (struct rb_root *)(runq + OFFSET(rq_cfs) + 
+				OFFSET(cfs_rq_tasks_timeline));
+		}
+
+		dump_RT_prio_array(nr_running != cfs_rq_nr_running,
+			runq + OFFSET(rq_rt) + OFFSET(rt_rq_active), 
+			&runqbuf[OFFSET(rq_rt) + OFFSET(rt_rq_active)]);
+
+		fprintf(fp, " CFS RB_ROOT: %lx\n", (ulong)root);
+
+		if (!leftmost)
+			continue;
+
+		for (node = rb_first(root); node; node = rb_next(node)) {
+			tc = task_to_context((ulong)node - OFFSET(task_struct_se) -
+			     OFFSET(sched_entity_run_node));
+			if (!tc)
+				continue;
+			INDENT(2);
+			print_task_header(fp, tc, FALSE);
+		}
+	}
+
+	FREEBUF(runqbuf);
+	if (cfs_rq_buf)
+		FREEBUF(cfs_rq_buf);
+}
+
+static void
+dump_RT_prio_array(int active, ulong k_prio_array, char *u_prio_array)
+{
+	int i, c, cnt, qheads;
+	ulong offset, kvaddr, uvaddr;
+	ulong list_head[2];
+        struct list_data list_data, *ld;
+	struct task_context *tc;
+	ulong *tlist;
+
+	fprintf(fp, " RT PRIO_ARRAY: %lx\n",  k_prio_array);
+
+	if (!active)
+		return;
+
+        qheads = (i = ARRAY_LENGTH(prio_array_queue)) ?
+                i : get_array_length("prio_array.queue", NULL, SIZE(list_head));
+
+	ld = &list_data;
+
+	for (i = 0; i < qheads; i++) {
+		offset =  OFFSET(prio_array_queue) + (i * SIZE(list_head));
+		kvaddr = k_prio_array + offset;
+		uvaddr = (ulong)u_prio_array + offset;
+		BCOPY((char *)uvaddr, (char *)&list_head[0], sizeof(ulong)*2);
+
+		if (CRASHDEBUG(1))
+			fprintf(fp, "prio_array[%d] @ %lx => %lx/%lx\n", 
+				i, kvaddr, list_head[0], list_head[1]);
+
+		if ((list_head[0] == kvaddr) && (list_head[1] == kvaddr))
+			continue;
+
+		fprintf(fp, "  [%3d] ", i);
+
+		BZERO(ld, sizeof(struct list_data));
+		ld->start = list_head[0];
+		ld->list_head_offset = OFFSET(task_struct_run_list);
+		ld->end = kvaddr;
+		hq_open();
+		cnt = do_list(ld);
+		hq_close();
+		tlist = (ulong *)GETBUF((cnt) * sizeof(ulong));
 		cnt = retrieve_list(tlist, cnt);
 		for (c = 0; c < cnt; c++) {
 			if (!(tc = task_to_context(tlist[c])))

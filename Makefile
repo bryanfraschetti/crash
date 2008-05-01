@@ -66,7 +66,8 @@ GENERIC_HFILES=defs.h xen_hyper_defs.h
 MCORE_HFILES=va_server.h vas_crash.h
 REDHAT_HFILES=netdump.h diskdump.h xendump.h
 LKCD_DUMP_HFILES=lkcd_vmdump_v1.h lkcd_vmdump_v2_v3.h lkcd_dump_v5.h \
-        lkcd_dump_v7.h lkcd_dump_v8.h lkcd_fix_mem.h
+        lkcd_dump_v7.h lkcd_dump_v8.h
+LKCD_OBSOLETE_HFILES=lkcd_fix_mem.h
 LKCD_TRACE_HFILES=lkcd_x86_trace.h
 IBM_HFILES=ibm_common.h
 UNWIND_HFILES=unwind.h unwind_i.h rse.h unwind_x86.h unwind_x86_64.h
@@ -84,7 +85,8 @@ CFILES=main.c tools.c global_data.c memory.c filesys.c help.c task.c \
 
 SOURCE_FILES=${CFILES} ${GENERIC_HFILES} ${MCORE_HFILES} \
 	${REDHAT_CFILES} ${REDHAT_HFILES} ${UNWIND_HFILES} \
-	${LKCD_DUMP_HFILES} ${LKCD_TRACE_HFILES} ${IBM_HFILES} 
+	${LKCD_DUMP_HFILES} ${LKCD_TRACE_HFILES} ${LKCD_OBSOLETE_HFILES}\
+	${IBM_HFILES} 
 
 OBJECT_FILES=main.o tools.o global_data.o memory.o filesys.o help.o task.o \
 	build_data.o kernel.o test.o gdb_interface.o net.o dev.o \
@@ -103,8 +105,38 @@ OBJECT_FILES=main.o tools.o global_data.o memory.o filesys.o help.o task.o \
 # directory.
 
 EXTENSIONS=extensions
-EXTENSION_SOURCE_FILES=${EXTENSIONS}/Makefile ${EXTENSIONS}/echo.c ${EXTENSIONS}/dminfo.c
-EXTENSION_OBJECT_FILES=echo.so dminfo.so 
+EXTENSION_SOURCE_FILES=${EXTENSIONS}/Makefile ${EXTENSIONS}/echo.c ${EXTENSIONS}/dminfo.c \
+        ${EXTENSIONS}/libsial/Makefile \
+        ${EXTENSIONS}/libsial/mkbaseop.c \
+        ${EXTENSIONS}/libsial/README \
+        ${EXTENSIONS}/libsial/README.sial \
+        ${EXTENSIONS}/libsial/sial_alloc.c \
+        ${EXTENSIONS}/libsial/sial_api.c \
+        ${EXTENSIONS}/libsial/sial_api.h \
+        ${EXTENSIONS}/libsial/sial_builtin.c \
+        ${EXTENSIONS}/libsial/sial_case.c \
+        ${EXTENSIONS}/libsial/sial_define.c \
+        ${EXTENSIONS}/libsial/sial_func.c \
+        ${EXTENSIONS}/libsial/sial.h \
+        ${EXTENSIONS}/libsial/sial_input.c \
+        ${EXTENSIONS}/libsial/sial.l \
+        ${EXTENSIONS}/libsial/sial-lsed \
+        ${EXTENSIONS}/libsial/sial_member.c \
+        ${EXTENSIONS}/libsial/sial_node.c \
+        ${EXTENSIONS}/libsial/sial_num.c \
+        ${EXTENSIONS}/libsial/sial_op.c \
+        ${EXTENSIONS}/libsial/sialpp.l \
+        ${EXTENSIONS}/libsial/sialpp-lsed \
+        ${EXTENSIONS}/libsial/sialpp.y \
+        ${EXTENSIONS}/libsial/sial_print.c \
+        ${EXTENSIONS}/libsial/sial_stat.c \
+        ${EXTENSIONS}/libsial/sial_str.c \
+        ${EXTENSIONS}/libsial/sial_type.c \
+        ${EXTENSIONS}/libsial/sial_util.c \
+        ${EXTENSIONS}/libsial/sial_var.c \
+        ${EXTENSIONS}/libsial/sial.y \
+        ${EXTENSIONS}/sial.c \
+        ${EXTENSIONS}/sial.mk
 
 DAEMON_OBJECT_FILES=remote_daemon.o va_server.o va_server_v1.o \
 	lkcd_common.o lkcd_v1.o lkcd_v2_v3.o lkcd_v5.o lkcd_v7.o lkcd_v8.o \
@@ -251,6 +283,7 @@ make_configure: force
 
 clean:
 	rm -f ${OBJECT_FILES} ${DAEMON_OBJECT_FILES} ${PROGRAM} ${PROGRAM}lib.a ${GDB_OFILES}
+	@(cd extensions; make --no-print-directory -i clean)
 
 make_build_data: force
 	cc -c ${CFLAGS} build_data.c ${WARNING_OPTIONS} ${WARNING_ERROR}
@@ -406,7 +439,7 @@ unwind_v3.o: ${GENERIC_HFILES} ${UNWIND_HFILES} unwind.c unwind_decoder.c
 	cc -c ${CFLAGS} -DREDHAT -DUNWIND_V3 unwind.c -o unwind_v3.o ${WARNING_OPTIONS} ${WARNING_ERROR}
 
 lkcd_fix_mem.o: ${GENERIC_HFILES} ${LKCD_HFILES} lkcd_fix_mem.c
-	cc -c ${CFLAGS} lkcd_fix_mem.c ${WARNING_OPTIONS} ${WARNING_ERROR}
+	cc -c ${CFLAGS} -DMCLX lkcd_fix_mem.c ${WARNING_OPTIONS} ${WARNING_ERROR}
 
 xen_hyper.o: ${GENERIC_HFILES} xen_hyper.c
 	cc -c ${CFLAGS} xen_hyper.c ${WARNING_OPTIONS} ${WARNING_ERROR}
@@ -446,7 +479,7 @@ gdb_files: make_configure
 
 show_files:
 	@if [ -f ${PROGRAM}  ]; then \
-		./${PROGRAM} --no_crashrc -h README > README; fi
+		./${PROGRAM} --no_scroll --no_crashrc -h README > README; echo $?; fi
 	@echo ${SOURCE_FILES} Makefile ${GDB_FILES} ${GDB_PATCH_FILES} COPYING README \
 	.rh_rpm_package crash.8 ${EXTENSION_SOURCE_FILES}
 
@@ -459,7 +492,7 @@ tar: make_configure
 
 do_tar:
 	@if [ -f ${PROGRAM}  ]; then \
-		./${PROGRAM} --no_crashrc -h README > README; fi
+		./${PROGRAM} --no_scroll --no_crashrc -h README > README; fi
 	tar cvzf ${PROGRAM}.tar.gz ${TAR_FILES} ${GDB_FILES} ${GDB_PATCH_FILES}
 	@echo; ls -l ${PROGRAM}.tar.gz
 
@@ -470,7 +503,7 @@ do_tar:
 # spec file will have its own release number, which will in turn get passed 
 # to the "all" target upon the initial build.
 
-RELEASE=4.0-4.1
+RELEASE=4.0-6.3
 
 release: make_configure
 	@if [ "`id --user`" != "0" ]; then \
@@ -498,7 +531,7 @@ do_release:
 	@tar cf - ${SOURCE_FILES} Makefile ${GDB_FILES} ${GDB_PATCH_FILES} COPYING \
 	.rh_rpm_package crash.8 ${EXTENSION_SOURCE_FILES} | (cd ./RELDIR/${PROGRAM}-${RELEASE}; tar xf -)
 	@cp ${GDB}.tar.gz ./RELDIR/${PROGRAM}-${RELEASE}
-	@./${PROGRAM} --no_crashrc -h README > ./RELDIR/${PROGRAM}-${RELEASE}/README
+	@./${PROGRAM} --no_scroll --no_crashrc -h README > ./RELDIR/${PROGRAM}-${RELEASE}/README
 	@(cd ./RELDIR; find . -exec chown root {} ";")
 	@(cd ./RELDIR; find . -exec chgrp root {} ";")
 	@(cd ./RELDIR; find . -exec touch {} ";")
@@ -543,4 +576,4 @@ extensions: make_configure
 	@make --no-print-directory do_extensions
 
 do_extensions:
-	@(cd extensions; make -i OBJECTS="$(EXTENSION_OBJECT_FILES)" TARGET=$(TARGET))
+	@(cd extensions; make -i TARGET=$(TARGET) TARGET_CFLAGS=$(TARGET_CFLAGS))

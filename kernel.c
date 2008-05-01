@@ -1,8 +1,8 @@
 /* kernel.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -49,7 +49,7 @@ static void read_in_kernel_config_err(int, char *);
 static void BUG_bytes_init(void);
 static int BUG_x86(void);
 static int BUG_x86_64(void);
-
+static void cpu_maps_init(void);
 
 
 /*
@@ -62,9 +62,12 @@ kernel_init()
 	char *p1, *p2, buf[BUFSIZE];
 	struct syment *sp1, *sp2;
 	char *rqstruct;
+	char *irq_desc_type_name;	
 
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
+
+	cpu_maps_init();
 
 	kt->stext = symbol_value("_stext");
 	kt->etext = symbol_value("_etext");
@@ -165,11 +168,14 @@ kernel_init()
 	verify_version();
 
 	if (symbol_exists("__per_cpu_offset")) {
-		i = get_array_length("__per_cpu_offset", NULL, 0);
-		get_symbol_data("__per_cpu_offset", 
-			sizeof(long)*(i <= NR_CPUS ? i : NR_CPUS),
-			&kt->__per_cpu_offset[0]); 
-		kt->flags |= PER_CPU_OFF;
+		if (LKCD_KERNTYPES())
+			i = get_cpus_possible();
+		else
+			i = get_array_length("__per_cpu_offset", NULL, 0);
+		get_symbol_data("__per_cpu_offset",
+			sizeof(long)*((i && (i <= NR_CPUS)) ? i : NR_CPUS),
+			&kt->__per_cpu_offset[0]);
+                kt->flags |= PER_CPU_OFF;
 	}
 	if (STRUCT_EXISTS("runqueue"))
 		rqstruct = "runqueue";
@@ -215,6 +221,8 @@ kernel_init()
         MEMBER_OFFSET_INIT(prio_array_nr_active, "prio_array", "nr_active");
 	STRUCT_SIZE_INIT(runqueue, rqstruct); 
 	STRUCT_SIZE_INIT(prio_array, "prio_array"); 
+
+	MEMBER_OFFSET_INIT(rq_cfs, "rq", "cfs");
 
        /*
         *  In 2.4, smp_send_stop() sets smp_num_cpus back to 1
@@ -278,13 +286,19 @@ kernel_init()
 	STRUCT_SIZE_INIT(hlist_head, "hlist_head"); 
 	STRUCT_SIZE_INIT(hlist_node, "hlist_node"); 
 
-	MEMBER_OFFSET_INIT(irq_desc_t_status,  "irq_desc_t", "status");
-	if (MEMBER_EXISTS("irq_desc_t", "handler"))
-		MEMBER_OFFSET_INIT(irq_desc_t_handler, "irq_desc_t", "handler");
+	if (STRUCT_EXISTS("irq_desc_t"))
+		irq_desc_type_name = "irq_desc_t";
 	else
-		MEMBER_OFFSET_INIT(irq_desc_t_chip, "irq_desc_t", "chip");
-	MEMBER_OFFSET_INIT(irq_desc_t_action, "irq_desc_t", "action");
-	MEMBER_OFFSET_INIT(irq_desc_t_depth, "irq_desc_t", "depth");
+		irq_desc_type_name = "irq_desc";
+
+	STRUCT_SIZE_INIT(irq_desc_t, irq_desc_type_name);
+	MEMBER_OFFSET_INIT(irq_desc_t_status, irq_desc_type_name, "status");
+	if (MEMBER_EXISTS(irq_desc_type_name, "handler"))
+		MEMBER_OFFSET_INIT(irq_desc_t_handler, irq_desc_type_name, "handler");
+	else
+		MEMBER_OFFSET_INIT(irq_desc_t_chip, irq_desc_type_name, "chip");
+	MEMBER_OFFSET_INIT(irq_desc_t_action, irq_desc_type_name, "action");
+	MEMBER_OFFSET_INIT(irq_desc_t_depth, irq_desc_type_name, "depth");
 	if (STRUCT_EXISTS("hw_interrupt_type")) {
 		MEMBER_OFFSET_INIT(hw_interrupt_type_typename,
 			"hw_interrupt_type", "typename");
@@ -346,8 +360,6 @@ kernel_init()
 	MEMBER_OFFSET_INIT(irqaction_dev_id, "irqaction", "dev_id");
 	MEMBER_OFFSET_INIT(irqaction_next, "irqaction", "next");
 
-	STRUCT_SIZE_INIT(irq_desc_t, "irq_desc_t");
-
         STRUCT_SIZE_INIT(irq_cpustat_t, "irq_cpustat_t");
         MEMBER_OFFSET_INIT(irq_cpustat_t___softirq_active, 
                 "irq_cpustat_t", "__softirq_active");
@@ -377,12 +389,26 @@ kernel_init()
 			"tvec_root_s", "vec");
 	        STRUCT_SIZE_INIT(tvec_s, "tvec_s");
 	        MEMBER_OFFSET_INIT(tvec_s_vec, "tvec_s", "vec");
+	} else {
+		STRUCT_SIZE_INIT(tvec_root_s, "tvec_root");
+        	if (VALID_STRUCT(tvec_root_s)) {
+               		STRUCT_SIZE_INIT(tvec_t_base_s, "tvec_base");
+                	MEMBER_OFFSET_INIT(tvec_t_base_s_tv1,
+                        	"tvec_base", "tv1");
+	        	MEMBER_OFFSET_INIT(tvec_root_s_vec, 
+				"tvec_root", "vec");
+	        	STRUCT_SIZE_INIT(tvec_s, "tvec");
+	        	MEMBER_OFFSET_INIT(tvec_s_vec, "tvec", "vec");
+		}
 	}
-
         STRUCT_SIZE_INIT(__wait_queue, "__wait_queue");
         if (VALID_STRUCT(__wait_queue)) {
-                MEMBER_OFFSET_INIT(__wait_queue_task,
-                        "__wait_queue", "task");
+		if (MEMBER_EXISTS("__wait_queue", "task"))
+			MEMBER_OFFSET_INIT(__wait_queue_task,
+				"__wait_queue", "task");
+		else
+			MEMBER_OFFSET_INIT(__wait_queue_task,
+				"__wait_queue", "private");
                 MEMBER_OFFSET_INIT(__wait_queue_head_task_list,
                         "__wait_queue_head", "task_list");
                 MEMBER_OFFSET_INIT(__wait_queue_task_list,
@@ -462,8 +488,119 @@ kernel_init()
 	if (!(kt->flags & DWARF_UNWIND))
 		kt->flags |= NO_DWARF_UNWIND; 
 
+	/* 
+	 *  OpenVZ 
+	 */
+	if (kernel_symbol_exists("pcpu_info") && 
+	    STRUCT_EXISTS("pcpu_info") && STRUCT_EXISTS("vcpu_struct")) {
+		MEMBER_OFFSET_INIT(pcpu_info_vcpu, "pcpu_info", "vcpu");
+		MEMBER_OFFSET_INIT(pcpu_info_idle, "pcpu_info", "idle");
+		MEMBER_OFFSET_INIT(vcpu_struct_rq, "vcpu_struct", "rq");
+		STRUCT_SIZE_INIT(pcpu_info, "pcpu_info");
+		STRUCT_SIZE_INIT(vcpu_struct, "vcpu_struct");
+		kt->flags |= ARCH_OPENVZ;
+	}
+
 	BUG_bytes_init();
 }
+
+/*
+ *  If the cpu_present_map, cpu_online_map and cpu_possible_maps exist,
+ *  set up the kt->cpu_flags[NR_CPUS] with their settings.
+ */ 
+static void
+cpu_maps_init(void)
+{
+        int i, c, m, cpu, len;
+        char *buf;
+        ulong *maskptr;
+	struct mapinfo {
+		ulong cpu_flag;
+		char *name;
+	} mapinfo[] = {
+		{ POSSIBLE, "cpu_possible_map" },
+		{ PRESENT, "cpu_present_map" },
+		{ ONLINE, "cpu_online_map" },
+	};
+
+	if ((len = STRUCT_SIZE("cpumask_t")) < 0)
+		len = sizeof(ulong);
+
+	buf = GETBUF(len);
+
+	for (m = 0; m < sizeof(mapinfo)/sizeof(struct mapinfo); m++) {
+		if (!kernel_symbol_exists(mapinfo[m].name))
+			continue;
+
+		if (!readmem(symbol_value(mapinfo[m].name), KVADDR, buf, len,
+		    mapinfo[m].name, RETURN_ON_ERROR)) {
+			error(WARNING, "cannot read %s\n", mapinfo[m].name);
+			continue;
+		}
+
+		maskptr = (ulong *)buf;
+		for (i = 0; i < (len/sizeof(ulong)); i++, maskptr++) {
+			if (*maskptr == 0)
+				continue;
+			for (c = 0; c < BITS_PER_LONG; c++)
+				if (*maskptr & (0x1UL << c)) {
+					cpu = (i * BITS_PER_LONG) + c;
+					kt->cpu_flags[cpu] |= mapinfo[m].cpu_flag;
+				}
+		}
+
+		if (CRASHDEBUG(1)) {
+			fprintf(fp, "%s: ", mapinfo[m].name);
+			for (i = 0; i < NR_CPUS; i++) {
+				if (kt->cpu_flags[i] & mapinfo[m].cpu_flag)
+					fprintf(fp, "%d ", i);
+			}
+			fprintf(fp, "\n");
+		}
+
+	}
+
+	FREEBUF(buf);
+}
+
+/*
+ *  Determine whether a cpu is in one of the cpu masks.
+ */
+int
+in_cpu_map(int map, int cpu)
+{
+	if (cpu >= (kt->kernel_NR_CPUS ? kt->kernel_NR_CPUS : NR_CPUS)) {
+		error(INFO, "in_cpu_map: invalid cpu: %d\n", cpu);
+		return FALSE;
+	}
+
+	switch (map)
+	{
+	case POSSIBLE:
+		if (!kernel_symbol_exists("cpu_possible_map")) {
+			error(INFO, "cpu_possible_map does not exist\n");
+			return FALSE;
+		}
+		return (kt->cpu_flags[cpu] & POSSIBLE);
+
+	case PRESENT:
+		if (!kernel_symbol_exists("cpu_present_map")) {
+			error(INFO, "cpu_present_map does not exist\n");
+			return FALSE;
+		}
+		return (kt->cpu_flags[cpu] & PRESENT);
+
+	case ONLINE:
+		if (!kernel_symbol_exists("cpu_online_map")) {
+			error(INFO, "cpu_online_map does not exist\n");
+			return FALSE;
+		}
+		return (kt->cpu_flags[cpu] & ONLINE);
+	}
+
+	return FALSE;
+}
+
 
 /*
  *  For lack of a better manner of verifying that the namelist and dumpfile
@@ -504,10 +641,10 @@ verify_version(void)
 		error(WARNING, "cannot read linux_banner string\n");
 
 	if (ACTIVE()) {
-		len = strlen(kt->proc_version) - 1;
+		len = strlen(kt->proc_version);
 		if ((len > 0) && (strncmp(buf, kt->proc_version, len) != 0)) {
                		if (CRASHDEBUG(1)) {
-                        	fprintf(fp, "/proc/version:\n%s", 
+                        	fprintf(fp, "/proc/version:\n%s\n", 
 					kt->proc_version);
                         	fprintf(fp, "linux_banner:\n%s\n", buf);
                 	}
@@ -522,7 +659,7 @@ verify_version(void)
                         	fprintf(fp, "linux_banner:\n%s\n", buf);
 			goto bad_match;
 		}
-		strcpy(kt->proc_version, buf);
+		strcpy(kt->proc_version, strip_linefeeds(buf));
 	}
 
 	verify_namelist();
@@ -717,6 +854,10 @@ verify_namelist()
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
 
+	/* the kerntypes may not match in terms of gcc version or SMP */
+	if (LKCD_KERNTYPES())
+		return;
+
 	if (!strlen(kt->utsname.version))
 		return;
 
@@ -736,7 +877,7 @@ verify_namelist()
 		if (!strstr(buffer, "Linux version 2."))
 			continue;
 
-                if (STREQ(buffer, kt->proc_version)) {
+                if (strstr(buffer, kt->proc_version)) {
                 	found = TRUE;
 			break;
 		}
@@ -783,7 +924,7 @@ verify_namelist()
 	if (found) {
                 if (CRASHDEBUG(1)) {
                 	fprintf(fp, "verify_namelist:\n");
-			fprintf(fp, "/proc/version:\n%s", kt->proc_version);
+			fprintf(fp, "/proc/version:\n%s\n", kt->proc_version);
 			fprintf(fp, "utsname version: %s\n",
 				kt->utsname.version);
 			fprintf(fp, "%s:\n%s\n", namelist, buffer);
@@ -793,7 +934,7 @@ verify_namelist()
 
         if (CRASHDEBUG(1)) {
                	fprintf(fp, "verify_namelist:\n");
-                fprintf(fp, "/proc/version:\n%s", kt->proc_version);
+                fprintf(fp, "/proc/version:\n%s\n", kt->proc_version);
                 fprintf(fp, "utsname version: %s\n", kt->utsname.version);
                 fprintf(fp, "%s:\n%s\n", namelist, buffer2);
         }
@@ -2089,6 +2230,11 @@ get_lkcd_regs(struct bt_info *bt, ulong *eip, ulong *esp)
 		return;
 	}
 
+	/* try to get it from the header */
+	if (get_lkcd_regs_for_cpu(bt, eip, esp) == 0)
+		return;
+
+	/* if that fails: do guessing */
 	sysrq_eip = sysrq_esp = 0;
 
 	for (i = 0, up = (ulong *)bt->stackbuf; i < LONGS_PER_STACK; i++, up++){
@@ -2117,6 +2263,18 @@ get_lkcd_regs(struct bt_info *bt, ulong *eip, ulong *esp)
 				((char *)(up-1) - bt->stackbuf);
                         return;
                 }
+		if (STREQ(sym, "dump_execute")) {
+                        *eip = *up;
+                        *esp = bt->stackbase + 
+				((char *)(up) - bt->stackbuf);
+                        return;
+		}
+		if (STREQ(sym, "vmdump_nmi_callback")) {
+                        *eip = *up;
+                        *esp = bt->stackbase + 
+				((char *)(up) - bt->stackbuf);
+                        return;
+		}
                 if (STREQ(sym, "smp_stop_cpu_interrupt")) {
                         *eip = *up;
                         *esp = bt->task + 
@@ -2999,6 +3157,18 @@ module_objfile_search(char *modref, char *filename, char *tree)
 	retbuf = search_directory_tree(dir, file);
 
 	if (!retbuf) {
+		sprintf(dir, "/lib/modules/%s/updates", kt->utsname.release);
+		if (!(retbuf = search_directory_tree(dir, file))) {
+			switch (kt->flags & (KMOD_V1|KMOD_V2))
+			{
+			case KMOD_V2:
+				sprintf(file, "%s.ko", modref);
+				retbuf = search_directory_tree(dir, file);
+			}
+		}
+	}
+
+	if (!retbuf) {
 		sprintf(dir, "/lib/modules/%s", kt->utsname.release);
 		if (!(retbuf = search_directory_tree(dir, file))) {
 			switch (kt->flags & (KMOD_V1|KMOD_V2))
@@ -3098,7 +3268,7 @@ void
 dump_log(int msg_level)
 {
 	int i;
-	ulong log_buf, log_start, logged_chars;
+	ulong log_buf, logged_chars;
 	char *buf;
 	char last;
 	ulong index;
@@ -3125,13 +3295,16 @@ dump_log(int msg_level)
 
 	buf = GETBUF(log_buf_len);
 	log_wrap = FALSE;
-	get_symbol_data("log_start", sizeof(ulong), &log_start);
 	get_symbol_data("logged_chars", sizeof(ulong), &logged_chars);
         readmem(log_buf, KVADDR, buf,
         	log_buf_len, "log_buf contents", FAULT_ON_ERROR);
 
-	log_start &= log_buf_len-1;
-	index = (logged_chars < log_buf_len) ? 0 : log_start;
+	if (logged_chars < log_buf_len) {
+		index = 0;
+	} else {
+		get_symbol_data("log_end", sizeof(ulong), &index);
+		index &= log_buf_len-1;
+	} 
 
 	if ((logged_chars < log_buf_len) && (index == 0) && (buf[index] == '<'))
 		loglevel = TRUE;
@@ -3669,7 +3842,7 @@ dump_kernel_table(int verbose)
         others = 0;
         uts = &kt->utsname;
 
-        fprintf(fp, "         flags: %lx  (", kt->flags);
+        fprintf(fp, "         flags: %lx\n  (", kt->flags);
 	if (kt->flags & NO_MODULE_ACCESS)
 		fprintf(fp, "%sNO_MODULE_ACCESS", others++ ? "|" : "");
 	if (kt->flags & TVEC_BASES_V1)
@@ -3708,6 +3881,8 @@ dump_kernel_table(int verbose)
 		fprintf(fp, "%sUSE_OLD_BT", others++ ? "|" : "");
 	if (kt->flags & ARCH_XEN)
 		fprintf(fp, "%sARCH_XEN", others++ ? "|" : "");
+	if (kt->flags & ARCH_OPENVZ)
+		fprintf(fp, "%sARCH_OPENVZ", others++ ? "|" : "");
 	if (kt->flags & NO_IKCONFIG)
 		fprintf(fp, "%sNO_IKCONFIG", others++ ? "|" : "");
 	if (kt->flags & DWARF_UNWIND)
@@ -3722,6 +3897,10 @@ dump_kernel_table(int verbose)
 		fprintf(fp, "%sDWARF_UNWIND_MODULES", others++ ? "|" : "");
 	if (kt->flags & BUGVERBOSE_OFF)
 		fprintf(fp, "%sBUGVERBOSE_OFF", others++ ? "|" : "");
+	if (kt->flags & RELOC_SET)
+		fprintf(fp, "%sRELOC_SET", others++ ? "|" : "");
+	if (kt->flags & RELOC_FORCE)
+		fprintf(fp, "%sRELOC_FORCE", others++ ? "|" : "");
 	fprintf(fp, ")\n");
         fprintf(fp, "         stext: %lx\n", kt->stext);
         fprintf(fp, "         etext: %lx\n", kt->etext);
@@ -3763,6 +3942,7 @@ dump_kernel_table(int verbose)
 	fprintf(fp, "   gcc_version: %d.%d.%d\n", kt->gcc_version[0], 
 		kt->gcc_version[1], kt->gcc_version[2]);
 	fprintf(fp, "     BUG_bytes: %d\n", kt->BUG_bytes);
+	fprintf(fp, "      relocate: %lx\n", kt->relocate);
 	fprintf(fp, " runq_siblings: %d\n", kt->runq_siblings);
 	fprintf(fp, "  __rq_idx[NR_CPUS]: ");
 	nr_cpus = kt->kernel_NR_CPUS ? kt->kernel_NR_CPUS : NR_CPUS;
@@ -3775,11 +3955,39 @@ dump_kernel_table(int verbose)
 	for (i = 0; i < nr_cpus; i++) 
 		fprintf(fp, "%s%.*lx ", (i % 4) == 0 ? "\n    " : "",
 			LONG_PRLEN, kt->__per_cpu_offset[i]);
-	fprintf(fp, "\n cpu_flags[NR_CPUS]:");
+	fprintf(fp, "\n cpu_flags[NR_CPUS]: ");
 	for (i = 0; i < nr_cpus; i++) 
 		fprintf(fp, "%lx ", kt->cpu_flags[i]);
+	fprintf(fp, "\n");
+	fprintf(fp, "       cpu_possible_map: ");
+	if (kernel_symbol_exists("cpu_possible_map")) {
+		for (i = 0; i < nr_cpus; i++) {
+			if (kt->cpu_flags[i] & POSSIBLE)
+				fprintf(fp, "%d ", i);
+		}
+		fprintf(fp, "\n");
+	} else
+		fprintf(fp, "(does not exist)\n");
+	fprintf(fp, "        cpu_present_map: ");
+	if (kernel_symbol_exists("cpu_present_map")) {
+		for (i = 0; i < nr_cpus; i++) {
+			if (kt->cpu_flags[i] & PRESENT)
+				fprintf(fp, "%d ", i);
+		}
+		fprintf(fp, "\n");
+	} else
+		fprintf(fp, "(does not exist)\n");
+	fprintf(fp, "         cpu_online_map: ");
+	if (kernel_symbol_exists("cpu_online_map")) {
+		for (i = 0; i < nr_cpus; i++) {
+			if (kt->cpu_flags[i] & ONLINE)
+				fprintf(fp, "%d ", i);
+		}
+		fprintf(fp, "\n");
+	} else
+		fprintf(fp, "(does not exist)\n");
 	others = 0;
-	fprintf(fp, "\n     xen_flags: %lx (", kt->xen_flags);
+	fprintf(fp, "     xen_flags: %lx (", kt->xen_flags);
         if (kt->xen_flags & WRITABLE_PAGE_TABLES)
                 fprintf(fp, "%sWRITABLE_PAGE_TABLES", others++ ? "|" : "");
         if (kt->xen_flags & SHADOW_PAGE_TABLES)
@@ -3852,7 +4060,7 @@ cmd_irq(void)
 	if (machine_type("S390") || machine_type("S390X"))
 		command_not_supported();
 
-        while ((c = getopt(argcnt, args, "db")) != EOF) {
+        while ((c = getopt(argcnt, args, "dbu")) != EOF) {
                 switch(c)
                 {
 		case 'd':
@@ -3882,6 +4090,17 @@ cmd_irq(void)
 			kt->display_bh();
 			return;
 
+		case 'u':
+			pc->curcmd_flags |= IRQ_IN_USE;
+			if (kernel_symbol_exists("no_irq_chip"))
+				pc->curcmd_private = (ulonglong)symbol_value("no_irq_chip");
+			else if (kernel_symbol_exists("no_irq_type"))
+				pc->curcmd_private = (ulonglong)symbol_value("no_irq_type");
+			else
+				error(WARNING, 
+       "irq: -u option ignored: \"no_irq_chip\" or \"no_irq_type\" symbols do not exist\n");
+			break;
+
                 default:
                         argerrs++;
                         break;
@@ -3899,6 +4118,8 @@ cmd_irq(void)
 			machdep->dump_irq(i);
 		return;
 	}
+
+	pc->curcmd_flags &= ~IRQ_IN_USE;
 
 	while (args[optind]) {
 		i = dtoi(args[optind], FAULT_ON_ERROR, NULL);
@@ -3952,6 +4173,9 @@ generic_dump_irq(int irq)
                 sizeof(long), "irq_desc entry", FAULT_ON_ERROR);
         readmem(irq_desc_addr + OFFSET(irq_desc_t_depth), KVADDR, &depth,
                 sizeof(int), "irq_desc entry", FAULT_ON_ERROR);
+
+	if (!action && (handler == (ulong)pc->curcmd_private))
+		return;
 
 	fprintf(fp, "    IRQ: %d\n", irq);
 	fprintf(fp, " STATUS: %x %s", status, status ? "(" : "");
@@ -4892,8 +5116,20 @@ dump_timer_data_tvec_bases_v2(void)
          */
         vec_root_size = (i = ARRAY_LENGTH(tvec_root_s_vec)) ?
                 i : get_array_length("tvec_root_s.vec", NULL, SIZE(list_head));
+	if (!vec_root_size && 
+	    (i = get_array_length("tvec_root.vec", NULL, SIZE(list_head))))
+		vec_root_size = i;
+	if (!vec_root_size)
+		error(FATAL, "cannot determine tvec_root.vec[] array size\n");
+
         vec_size = (i = ARRAY_LENGTH(tvec_s_vec)) ?
                 i : get_array_length("tvec_s.vec", NULL, SIZE(list_head));
+	if (!vec_size &&
+	    (i = get_array_length("tvec.vec", NULL, SIZE(list_head))))
+		vec_size = i;
+	if (!vec_size)
+		error(FATAL, "cannot determine tvec.vec[] array size\n");
+
         vec = (ulong *)GETBUF(SIZE(list_head) * MAX(vec_root_size, vec_size));
 	cpu = 0;
 
@@ -5453,8 +5689,7 @@ clear_machdep_cache(void)
 }
 
 /*
- *  For kernels containing at least the cpu_online_map, use it
- *  to determine the cpu count.
+ *  If it exists, return the number of cpus in the cpu_online_map.
  */
 int
 get_cpus_online()
@@ -5467,8 +5702,12 @@ get_cpus_online()
 	if (!symbol_exists("cpu_online_map")) 
 		return 0;
 
-	len = get_symbol_type("cpu_online_map", NULL, &req) == TYPE_CODE_UNDEF ?
-		sizeof(ulong) : req.length;
+	if (LKCD_KERNTYPES()) {
+		if ((len = STRUCT_SIZE("cpumask_t")) < 0)
+			error(FATAL, "cannot determine type cpumask_t\n");
+	} else
+		len = get_symbol_type("cpu_online_map", NULL, &req) ==
+			TYPE_CODE_UNDEF ?  sizeof(ulong) : req.length;
 	buf = GETBUF(len);
 
 	online = 0;
@@ -5486,6 +5725,85 @@ get_cpus_online()
 	}
 
 	return online;
+}
+
+/*
+ *  If it exists, return the number of cpus in the cpu_present_map.
+ */
+int
+get_cpus_present()
+{
+	int i, len, present;
+	struct gnu_request req;
+	char *buf;
+	ulong *maskptr;
+
+	if (!symbol_exists("cpu_present_map")) 
+		return 0;
+
+	if (LKCD_KERNTYPES()) {
+		if ((len = STRUCT_SIZE("cpumask_t")) < 0)
+			error(FATAL, "cannot determine type cpumask_t\n");
+	} else
+		len = get_symbol_type("cpu_present_map", NULL, &req) ==
+			TYPE_CODE_UNDEF ?  sizeof(ulong) : req.length;
+	buf = GETBUF(len);
+
+	present = 0;
+
+        if (readmem(symbol_value("cpu_present_map"), KVADDR, buf, len,
+            "cpu_present_map", RETURN_ON_ERROR)) {
+
+		maskptr = (ulong *)buf;
+		for (i = 0; i < (len/sizeof(ulong)); i++, maskptr++)
+			present += count_bits_long(*maskptr);
+
+		FREEBUF(buf);
+		if (CRASHDEBUG(1))
+			error(INFO, "get_cpus_present: present: %d\n", present);
+	}
+
+	return present;
+}
+
+/*
+ *  If it exists, return the number of cpus in the cpu_possible_map.
+ */
+int
+get_cpus_possible()
+{
+	int i, len, possible;
+	struct gnu_request req;
+	char *buf;
+	ulong *maskptr;
+
+	if (!symbol_exists("cpu_possible_map"))
+		return 0;
+
+	if (LKCD_KERNTYPES()) {
+		if ((len = STRUCT_SIZE("cpumask_t")) < 0)
+			error(FATAL, "cannot determine type cpumask_t\n");
+	} else
+		len = get_symbol_type("cpu_possible_map", NULL, &req) ==
+			TYPE_CODE_UNDEF ?  sizeof(ulong) : req.length;
+	buf = GETBUF(len);
+
+	possible = 0;
+
+	if (readmem(symbol_value("cpu_possible_map"), KVADDR, buf, len,
+		"cpu_possible_map", RETURN_ON_ERROR)) {
+
+		maskptr = (ulong *)buf;
+		for (i = 0; i < (len/sizeof(ulong)); i++, maskptr++)
+			possible += count_bits_long(*maskptr);
+
+		FREEBUF(buf);
+		if (CRASHDEBUG(1))
+			error(INFO, "get_cpus_possible: possible: %d\n",
+				possible);
+	}
+
+	return possible;
 }
 
 /*

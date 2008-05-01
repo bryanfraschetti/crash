@@ -1,8 +1,8 @@
 /* symbols.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,8 @@
 
 static void store_symbols(bfd *, int, void *, long, unsigned int);
 static void store_sysmap_symbols(void);
+static ulong relocate(ulong, char *, int);
+static int relocate_force(ulong, char *);
 static void strip_module_symbol_end(char *s);
 static int compare_syms(const void *, const void *);
 static int compare_mods(const void *, const void *);
@@ -71,6 +73,8 @@ static int display_per_cpu_info(struct syment *);
 #define MODULE_SECTIONS  (void *)(2) 
 #define VERIFY_SECTIONS  (void *)(3)
 
+#define EV_DWARFEXTRACT  101010101
+
 #define PARSE_FOR_DATA        (1)
 #define PARSE_FOR_DECLARATION (2)
 static void parse_for_member(struct datatype_member *, ulong);
@@ -115,6 +119,7 @@ static void print_union(char *, ulong);
 static void dump_datatype_member(FILE *, struct datatype_member *);
 static void dump_datatype_flags(ulong, FILE *);
 static void dump_enumerator_list(char *);
+static long anon_member_offset(char *, char *);
 static int gdb_whatis(char *);
 static void do_datatype_declaration(struct datatype_member *, ulong);
 
@@ -144,6 +149,12 @@ symtab_init(void)
   	if (!bfd_check_format_matches(st->bfd, bfd_object, &matching))
 		error(FATAL, "cannot determine object file format: %s\n",
 			pc->namelist);
+	/*
+	 *  Check whether the namelist is a kerntypes file built by
+	 *  dwarfextract, which places a magic number in e_version.
+	 */
+	if (file_elf_version(pc->namelist) == EV_DWARFEXTRACT)
+		pc->flags |= KERNTYPES;
 
 	if (pc->flags & SYSMAP) {
 		bfd_map_over_sections(st->bfd, section_header_info, 
@@ -158,13 +169,16 @@ symtab_init(void)
 		}
 		store_sysmap_symbols();
 		return;
-	} 
+	} else if (LKCD_KERNTYPES())
+		error(FATAL, "%s: use of kerntypes requires a system map\n",
+			pc->namelist);
 
 	/*
 	 *  Pull a bait-and-switch on st->bfd if we've got a separate
-         *  .gnu_debuglink file that matches the CRC.
+         *  .gnu_debuglink file that matches the CRC. Not done for kerntypes.
 	 */
-	if (!(bfd_get_file_flags(st->bfd) & HAS_SYMS)) {
+	if (!(LKCD_KERNTYPES()) &&
+	    !(bfd_get_file_flags(st->bfd) & HAS_SYMS)) {
 		if (!check_gnu_debuglink(st->bfd))
 			no_debugging_data(FATAL);
 	}
@@ -476,6 +490,11 @@ get_text_init_space(void)
         kt->stext_init = (ulong)bfd_get_section_vma(st->bfd, section);
         kt->etext_init = kt->stext_init +
         	(ulong)bfd_section_size(st->bfd, section);
+
+	if (kt->relocate) {
+		kt->stext_init -= kt->relocate;
+		kt->etext_init -= kt->relocate;
+	}
 }
 
 /*
@@ -491,6 +510,7 @@ store_symbols(bfd *abfd, int dynamic, void *minisyms, long symcount,
   	bfd_byte *from, *fromend;
         symbol_info syminfo;
 	struct syment *sp;
+	int first;
 
   	if ((store = bfd_make_empty_symbol(abfd)) == NULL)
 		error(FATAL, "bfd_make_empty_symbol() failed\n");
@@ -510,6 +530,13 @@ store_symbols(bfd *abfd, int dynamic, void *minisyms, long symcount,
 	st->symcnt = 0;
 	sp = st->symtable;
 
+	if (machine_type("X86")) {
+		if (!(kt->flags & RELOC_SET))
+			kt->flags |= RELOC_FORCE;
+	} else
+		kt->flags &= ~RELOC_SET;
+
+	first = 0;
   	from = (bfd_byte *) minisyms;
   	fromend = from + symcount * size;
   	for (; from < fromend; from += size)
@@ -521,7 +548,11 @@ store_symbols(bfd *abfd, int dynamic, void *minisyms, long symcount,
       		bfd_get_symbol_info(abfd, sym, &syminfo);
 		if (machdep->verify_symbol(syminfo.name, syminfo.value, 
 		    syminfo.type)) {
-			sp->value = syminfo.value;
+			if (kt->flags & (RELOC_SET|RELOC_FORCE))
+				sp->value = relocate(syminfo.value,
+					(char *)syminfo.name, !(first++));
+			else
+				sp->value = syminfo.value;
 			sp->type = syminfo.type;
 			namespace_ctl(NAMESPACE_INSTALL, &st->namespace,
 				sp, (char *)syminfo.name); 
@@ -545,7 +576,7 @@ store_symbols(bfd *abfd, int dynamic, void *minisyms, long symcount,
 static void
 store_sysmap_symbols(void)
 {
-	int c;
+	int c, first;
 	long symcount;
 	char buf[BUFSIZE];
 	FILE *map;
@@ -569,6 +600,10 @@ store_sysmap_symbols(void)
                 error(FATAL, "symbol table namespace malloc: %s\n",
                         strerror(errno));
 
+	if (!machine_type("X86"))
+		kt->flags &= ~RELOC_SET;
+
+	first = 0;
         st->syment_size = symcount * sizeof(struct syment);
         st->symcnt = 0;
         sp = st->symtable;
@@ -585,7 +620,11 @@ store_sysmap_symbols(void)
 
                 if (machdep->verify_symbol(syment.name, syment.value, 
 		    syment.type)) {
-                        sp->value = syment.value;
+			if (kt->flags & RELOC_SET)
+				sp->value = relocate(syment.value,
+					syment.name, !(first++));
+			else
+				sp->value = syment.value;
                         sp->type = syment.type;
                         namespace_ctl(NAMESPACE_INSTALL, &st->namespace,
                                 sp, syment.name);
@@ -605,6 +644,96 @@ store_sysmap_symbols(void)
 
 	symname_hash_init();
 	symval_hash_init();
+}
+
+/*
+ *  Handle x86 kernels configured such that the vmlinux symbols
+ *  are not as loaded into the kernel (not unity-mapped).
+ */
+static ulong
+relocate(ulong symval, char *symname, int first_symbol)
+{
+	switch (kt->flags & (RELOC_SET|RELOC_FORCE))
+	{
+	case RELOC_SET: 
+		break;
+
+	case RELOC_FORCE:
+		if (first_symbol && !relocate_force(symval, symname))
+			kt->flags &= ~RELOC_FORCE;
+		break;
+	}
+
+	return (symval - kt->relocate);
+}
+
+/*
+ *  If no --reloc argument was passed, try to figure it out
+ *  by comparing the first vmlinux kernel symbol with the
+ *  first /proc/kallsyms symbol.  (should be "_text")
+ *
+ *  Live system only (at least for now).
+ */
+static int
+relocate_force(ulong symval, char *symname)
+{
+        FILE *kp;
+	char buf[BUFSIZE];
+        char *kallsyms[MAXARGS];
+	ulong first;
+
+	if (!ACTIVE() || !file_exists("/proc/kallsyms", NULL)) {
+		if (CRASHDEBUG(1))
+			fprintf(fp, 
+			    "cannot determine relocation value: %s\n",
+				!ACTIVE() ? "not a live system" : 
+				"/proc/kallsyms does not exist");
+		return FALSE;
+	}
+
+ 	if ((kp = fopen("/proc/kallsyms", "r")) == NULL) {
+		if (CRASHDEBUG(1))
+                	fprintf(fp, 
+			    "cannot open /proc/kallsyms to determine relocation\n");
+                return FALSE;
+        }
+
+	if (!fgets(buf, BUFSIZE, kp) ||
+	    (parse_line(buf, kallsyms) != 3) ||
+	    !hexadecimal(kallsyms[0], 0)) {
+		fclose(kp);
+		if (CRASHDEBUG(1))
+			fprintf(fp, 
+			    "malformed /proc/kallsyms: cannot determine relocation value\n");
+		return FALSE;
+	}
+	fclose(kp);
+
+	first = htol(kallsyms[0], RETURN_ON_ERROR, NULL);
+
+	if (CRASHDEBUG(1))
+		fprintf(fp, 
+		    "RELOCATE: %s @ %lx %s\n"
+		    "          %s @ %lx /proc/kallsyms\n",
+			symname, symval, pc->namelist,
+			kallsyms[2], first);
+
+	/*
+	 *  If the symbols match and have different values,
+	 *  force the relocation.
+	 */
+	if (STREQ(symname, kallsyms[2])) {
+		if (symval > first) {
+			kt->relocate = symval - first;
+			return TRUE;
+		}
+	}
+
+	if (CRASHDEBUG(1))
+		fprintf(fp, 
+		    "cannot determine relocation value from first symbol\n");
+
+	return FALSE;
 }
 
 /*
@@ -2368,6 +2497,106 @@ is_elf_file(char *s)
 }
 
 /*
+ *  Verify a vmlinux file, issuing a warning for processor and endianness
+ *  mismatches.
+ */
+int
+is_kernel(char *file)
+{
+	int fd, swap;
+	char eheader[BUFSIZE];
+	Elf32_Ehdr *elf32;
+	Elf64_Ehdr *elf64;
+
+	if ((fd = open(file, O_RDONLY)) < 0) {
+		error(INFO, "%s: %s\n", file, strerror(errno));
+		return FALSE;
+	}
+	if (read(fd, eheader, BUFSIZE) != BUFSIZE) {
+                /* error(INFO, "%s: %s\n", file, strerror(errno)); */
+		close(fd);
+		return FALSE;
+	}  
+	close(fd);
+
+	if (!STRNEQ(eheader, ELFMAG) || eheader[EI_VERSION] != EV_CURRENT)
+		return FALSE;
+
+	elf32 = (Elf32_Ehdr *)&eheader[0];
+	elf64 = (Elf64_Ehdr *)&eheader[0];
+
+	swap = (((eheader[EI_DATA] == ELFDATA2LSB) && 
+	     (__BYTE_ORDER == __BIG_ENDIAN)) ||
+	    ((eheader[EI_DATA] == ELFDATA2MSB) && 
+	     (__BYTE_ORDER == __LITTLE_ENDIAN)));
+
+        if ((elf32->e_ident[EI_CLASS] == ELFCLASS32) &&
+	    (swap16(elf32->e_type, swap) == ET_EXEC) &&
+	    (swap32(elf32->e_version, swap) == EV_CURRENT)) {
+		switch (swap16(elf32->e_machine, swap))
+		{
+		case EM_386:
+			if (machine_type_mismatch(file, "X86", NULL, 0))
+				goto bailout;
+			break;
+
+		case EM_S390:
+			if (machine_type_mismatch(file, "S390", NULL, 0))
+				goto bailout;
+			break;
+
+		default:
+			if (machine_type_mismatch(file, "(unknown)", NULL, 0))
+				goto bailout;
+		}
+
+		if (endian_mismatch(file, elf32->e_ident[EI_DATA], 0))
+			goto bailout;
+
+	} else if ((elf64->e_ident[EI_CLASS] == ELFCLASS64) &&
+	    (swap16(elf64->e_type, swap) == ET_EXEC) &&
+	    (swap32(elf64->e_version, swap) == EV_CURRENT)) {
+		switch (swap16(elf64->e_machine, swap))
+		{
+		case EM_IA_64:
+			if (machine_type_mismatch(file, "IA64", NULL, 0))
+				goto bailout;
+			break;
+
+		case EM_PPC64:
+			if (machine_type_mismatch(file, "PPC64", NULL, 0))
+				goto bailout;
+			break;
+
+		case EM_X86_64:
+			if (machine_type_mismatch(file, "X86_64", NULL, 0)) 
+				goto bailout;
+			break;
+
+		case EM_386:
+			if (machine_type_mismatch(file, "X86", NULL, 0))
+				goto bailout;
+			break;
+
+		case EM_S390:
+			if (machine_type_mismatch(file, "S390X", NULL, 0))
+				goto bailout;
+			break;
+
+		default:
+			if (machine_type_mismatch(file, "(unknown)", NULL, 0))
+				goto bailout;
+		}
+
+		if (endian_mismatch(file, elf64->e_ident[EI_DATA], 0))
+			goto bailout;
+	}
+
+bailout:
+	return(is_bfd_format(file));
+}
+
+/*
  *  Given a choice between two namelists, pick the one for gdb to use.
  *  For now, just check get their stats and check their sizes; the larger 
  *  one presumably has debug data.
@@ -3507,6 +3736,34 @@ symbol_value(char *symbol)
 }
 
 /*
+ *  Return the value of a symbol from a specific module.
+ */
+ulong
+symbol_value_module(char *symbol, char *module)
+{
+	int i;
+	struct syment *sp, *sp_end;
+	struct load_module *lm;
+
+	for (i = 0; i < st->mods_installed; i++) {
+		lm = &st->load_modules[i];
+
+		if (!STREQ(module, lm->mod_name))
+			continue;
+
+		sp = lm->mod_symtable;
+		sp_end = lm->mod_symend;
+
+		for ( ; sp < sp_end; sp++) {
+			if (STREQ(symbol, sp->name))
+				return(sp->value);
+		}
+	}
+
+	return 0;
+}
+
+/*
  *  Return the symbol name of a given value, with no allowance for offsets.
  *  Returns NULL on failure to allow for testing of a value.
  */
@@ -3638,6 +3895,8 @@ datatype_init(void)
  *   #define STRUCT_EXISTS(X)    (datatype_info((X), NULL, NULL) >= 0)
  *   #define MEMBER_EXISTS(X,Y)  (datatype_info((X), (Y), NULL) >= 0)
  *   #define MEMBER_SIZE(X,Y)    datatype_info((X), (Y), MEMBER_SIZE_REQUEST)
+ *   #define MEMBER_TYPE(X,Y)    datatype_info((X), (Y), MEMBER_TYPE_REQUEST)
+ *   #define ANON_MEMBER_OFFSET(X,Y)    datatype_info((X), (Y), ANON_MEMBER_OFFSET_REQUEST)
  *
  *  to determine structure or union sizes, or member offsets.
  */
@@ -3649,6 +3908,9 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 	int member_typecode;
         ulong type_found;
 	char buf[BUFSIZE];
+
+        if (dm == ANON_MEMBER_OFFSET_REQUEST)
+		return anon_member_offset(name, member);
 
 	strcpy(buf, name);
 
@@ -3773,11 +4035,12 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 
 	FREEBUF(req);
 
-        if (dm && (dm != MEMBER_SIZE_REQUEST)) {
+        if (dm && (dm != MEMBER_SIZE_REQUEST) && (dm != MEMBER_TYPE_REQUEST)) {
                 dm->type = type_found;
                 dm->size = size;
 		dm->member_size = member_size;
 		dm->member_typecode = member_typecode;
+		dm->member_offset = offset;
 		if (req->is_typedef) {
 			dm->flags |= TYPEDEF;
 		}
@@ -3792,10 +4055,39 @@ datatype_info(char *name, char *member, struct datatype_member *dm)
 
 	if (dm == MEMBER_SIZE_REQUEST)
 		return member_size;
-        else if (member) 
+	else if (dm == MEMBER_TYPE_REQUEST)
+		return member_typecode;
+        else if (member)
 		return offset;
 	else
                 return size;
+}
+
+/*
+ *  Determine the offset of a member in an anonymous union
+ *  in a structure.
+ */
+static long
+anon_member_offset(char *name, char *member)
+{
+	int c;
+	char buf[BUFSIZE];
+	char *arglist[MAXARGS];
+	ulong value;
+
+	value = -1;
+	sprintf(buf, "print &((struct %s *)0x0)->%s", name, member);
+
+	open_tmpfile();
+	if (gdb_pass_through(buf, fp, GNU_RETURN_ON_ERROR)) {
+		rewind(pc->tmpfile);
+		if (fgets(buf, BUFSIZE, pc->tmpfile) &&
+	    	    (c = parse_line(strip_linefeeds(buf), arglist)))
+			value = stol(arglist[c-1], RETURN_ON_ERROR|QUIET, NULL);
+	}
+	close_tmpfile();
+
+	return value;
 }
 
 /*
@@ -5310,7 +5602,8 @@ get_array_length(char *s, int *two_dim, long entry_size)
 	if ((retval = builtin_array_length(s, 0, two_dim)))
 		return retval;
 
-	if (symbol_search(s)) {
+	/* symbol_search cannot be done with just kernel type information */
+	if (!(LKCD_KERNTYPES()) && symbol_search(s)) {
 		if (!two_dim) {
 			req = &gnu_request;
 			if ((get_symbol_type(copy, NULL, req) == 
@@ -5420,6 +5713,23 @@ store_builtin:
 }
 
 /*
+ *   Get and store the size of a "known" array.
+ *   A wrapper for get_array_length(), for cases in which
+ *   the name of the result to be stored is different from the
+ *   structure.member to be evaluated.
+ */
+int
+get_array_length_alt(char *name, char *s, int *two_dim, long entry_size)
+{
+	int retval;
+
+	retval = get_array_length(s, two_dim, entry_size);
+	if (retval)
+		retval = builtin_array_length(name, retval, two_dim);
+	return retval;
+}
+
+/*
  *  Designed for use by non-debug kernels, but used by all.
  */
 int
@@ -5474,11 +5784,16 @@ builtin_array_length(char *s, int len, int *two_dim)
                 lenptr = &array_table.prio_array_queue;
 	else if (STREQ(s, "height_to_maxindex"))
 		lenptr = &array_table.height_to_maxindex;
+	else if (STREQ(s, "pid_hash"))
+		lenptr = &array_table.pid_hash;
         else if (STREQ(s, "free_area")) {
                 lenptr = &array_table.free_area;
 		if (two_dim)
 			dimptr = &array_table.free_area_DIMENSION;
-	} 
+	} else if (STREQ(s, "kmem_cache.node"))
+		lenptr = &array_table.kmem_cache_node;
+	else if (STREQ(s, "kmem_cache.cpu_slab"))
+		lenptr = &array_table.kmem_cache_cpu_slab;
 
 	if (!lenptr)                /* not stored */
 		return(len);        
@@ -5611,10 +5926,16 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(task_struct_last_run));
         fprintf(fp, "         task_struct_timestamp: %ld\n",
                 OFFSET(task_struct_timestamp));
+        fprintf(fp, "        task_struct_sched_info: %ld\n",
+                OFFSET(task_struct_sched_info));
+	fprintf(fp, "       sched_info_last_arrival: %ld\n",
+                OFFSET(sched_info_last_arrival));
         fprintf(fp, "       task_struct_thread_info: %ld\n",
                 OFFSET(task_struct_thread_info));
         fprintf(fp, "           task_struct_nsproxy: %ld\n",
                 OFFSET(task_struct_nsproxy));
+        fprintf(fp, "              task_struct_rlim: %ld\n",
+                OFFSET(task_struct_rlim));
 
 	fprintf(fp, "              thread_info_task: %ld\n",
                 OFFSET(thread_info_task));
@@ -5636,6 +5957,19 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(pid_link_pid));
         fprintf(fp, "                pid_hash_chain: %ld\n",
                 OFFSET(pid_hash_chain));
+
+	fprintf(fp, "                   pid_numbers: %ld\n",
+		OFFSET(pid_numbers));
+
+	fprintf(fp, "                       upid_nr: %ld\n",
+		OFFSET(upid_nr));
+	fprintf(fp, "                       upid_ns: %ld\n",
+		OFFSET(upid_ns));
+	fprintf(fp, "                upid_pid_chain: %ld\n",
+		OFFSET(upid_pid_chain));
+
+	fprintf(fp, "                     pid_tasks: %ld\n",
+		OFFSET(pid_tasks));
 
         fprintf(fp, "               hlist_node_next: %ld\n",
 		OFFSET(hlist_node_next));
@@ -5663,6 +5997,9 @@ dump_offset_table(char *spec, ulong makestruct)
         	OFFSET(signal_struct_action));
 	fprintf(fp, "  signal_struct_shared_pending: %ld\n",
         	OFFSET(signal_struct_shared_pending));
+	fprintf(fp, "            signal_struct_rlim: %ld\n",
+        	OFFSET(signal_struct_rlim));
+
         fprintf(fp, "        task_struct_start_time: %ld\n",
                 OFFSET(task_struct_start_time));
         fprintf(fp, "             task_struct_times: %ld\n",
@@ -5784,6 +6121,8 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(mm_struct_rss));
 	fprintf(fp, "            mm_struct_anon_rss: %ld\n", 
 		OFFSET(mm_struct_anon_rss));
+	fprintf(fp, "            mm_struct_file_rss: %ld\n", 
+		OFFSET(mm_struct_file_rss));
 	fprintf(fp, "            mm_struct_total_vm: %ld\n", 
 		OFFSET(mm_struct_total_vm));
 	fprintf(fp, "          mm_struct_start_code: %ld\n", 
@@ -5910,6 +6249,15 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(page_lru));
         fprintf(fp, "                      page_pte: %ld\n",
                 OFFSET(page_pte));
+
+        fprintf(fp, "                    page_inuse: %ld\n",
+                OFFSET(page_inuse));
+        fprintf(fp, "                     page_slab: %ld\n",
+                OFFSET(page_slab));
+        fprintf(fp, "               page_first_page: %ld\n",
+                OFFSET(page_first_page));
+        fprintf(fp, "                 page_freelist: %ld\n",
+                OFFSET(page_freelist));
 
         fprintf(fp, "    swap_info_struct_swap_file: %ld\n",
 		OFFSET(swap_info_struct_swap_file));
@@ -6240,6 +6588,49 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "                     slab_free: %ld\n",
                 OFFSET(slab_free));
 
+        fprintf(fp, "               kmem_cache_size: %ld\n",
+                OFFSET(kmem_cache_size));
+        fprintf(fp, "            kmem_cache_objsize: %ld\n",
+                OFFSET(kmem_cache_objsize));
+        fprintf(fp, "             kmem_cache_offset: %ld\n",
+                OFFSET(kmem_cache_offset));
+        fprintf(fp, "              kmem_cache_order: %ld\n",
+                OFFSET(kmem_cache_order));
+        fprintf(fp, "         kmem_cache_local_node: %ld\n",
+                OFFSET(kmem_cache_local_node));
+        fprintf(fp, "            kmem_cache_objects: %ld\n",
+                OFFSET(kmem_cache_objects));
+        fprintf(fp, "              kmem_cache_inuse: %ld\n",
+                OFFSET(kmem_cache_inuse));
+        fprintf(fp, "              kmem_cache_align: %ld\n",
+                OFFSET(kmem_cache_align));
+        fprintf(fp, "               kmem_cache_name: %ld\n",
+                OFFSET(kmem_cache_name));
+        fprintf(fp, "               kmem_cache_list: %ld\n",
+                OFFSET(kmem_cache_list));
+        fprintf(fp, "               kmem_cache_node: %ld\n",
+                OFFSET(kmem_cache_node));
+        fprintf(fp, "           kmem_cache_cpu_slab: %ld\n",
+                OFFSET(kmem_cache_cpu_slab));
+
+        fprintf(fp, "    kmem_cache_node_nr_partial: %ld\n",
+                OFFSET(kmem_cache_node_nr_partial));
+        fprintf(fp, "      kmem_cache_node_nr_slabs: %ld\n",
+                OFFSET(kmem_cache_node_nr_slabs));
+        fprintf(fp, "       kmem_cache_node_partial: %ld\n",
+                OFFSET(kmem_cache_node_partial));
+        fprintf(fp, "          kmem_cache_node_full: %ld\n",
+                OFFSET(kmem_cache_node_full));
+
+        fprintf(fp, "       kmem_cache_cpu_freelist: %ld\n",
+                OFFSET(kmem_cache_cpu_freelist));
+        fprintf(fp, "           kmem_cache_cpu_page: %ld\n",
+                OFFSET(kmem_cache_cpu_page));
+        fprintf(fp, "           kmem_cache_cpu_node: %ld\n",
+                OFFSET(kmem_cache_cpu_node));
+        fprintf(fp, "              kmem_cache_flags: %ld\n",
+                OFFSET(kmem_cache_flags));
+
 	fprintf(fp, "               net_device_next: %ld\n",
         	OFFSET(net_device_next));
 	fprintf(fp, "               net_device_name: %ld\n",
@@ -6250,6 +6641,11 @@ dump_offset_table(char *spec, ulong makestruct)
         	OFFSET(net_device_addr_len));
 	fprintf(fp, "             net_device_ip_ptr: %ld\n",
         	OFFSET(net_device_ip_ptr));
+	fprintf(fp, "           net_device_dev_list: %ld\n",
+		OFFSET(net_device_dev_list));
+	fprintf(fp, "             net_dev_base_head: %ld\n",
+		OFFSET(net_dev_base_head));
+
 	fprintf(fp, "                   device_next: %ld\n",
         	OFFSET(device_next));
 	fprintf(fp, "                   device_name: %ld\n",
@@ -6406,6 +6802,8 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(zone_name));
 	fprintf(fp, "            zone_spanned_pages: %ld\n",
                 OFFSET(zone_spanned_pages));
+	fprintf(fp, "            zone_present_pages: %ld\n",
+                OFFSET(zone_present_pages));
 	fprintf(fp, "           zone_zone_start_pfn: %ld\n",
                 OFFSET(zone_zone_start_pfn));
 	fprintf(fp, "                zone_pages_min: %ld\n",
@@ -6416,6 +6814,16 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(zone_pages_high));
 	fprintf(fp, "                  zone_vm_stat: %ld\n",
                 OFFSET(zone_vm_stat));
+	fprintf(fp, "                zone_nr_active: %ld\n",
+                OFFSET(zone_nr_active));
+	fprintf(fp, "              zone_nr_inactive: %ld\n",
+                OFFSET(zone_nr_inactive));
+	fprintf(fp, "        zone_all_unreclaimable: %ld\n",
+                OFFSET(zone_all_unreclaimable));
+	fprintf(fp, "                    zone_flags: %ld\n",
+                OFFSET(zone_flags));
+	fprintf(fp, "            zone_pages_scanned: %ld\n",
+                OFFSET(zone_pages_scanned));
 
         fprintf(fp, "                neighbour_next: %ld\n", 
 		OFFSET(neighbour_next));
@@ -6586,6 +6994,31 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "             unwind_table_name: %ld\n",
 		OFFSET(unwind_table_name));
 
+	fprintf(fp, "                        rq_cfs: %ld\n",
+		OFFSET(rq_cfs));
+	fprintf(fp, "                         rq_rt: %ld\n",
+		OFFSET(rq_rt));
+	fprintf(fp, "                 rq_nr_running: %ld\n",
+		OFFSET(rq_nr_running));
+	fprintf(fp, "                task_struct_se: %ld\n",
+		OFFSET(task_struct_se));
+	fprintf(fp, "         sched_entity_run_node: %ld\n",
+		OFFSET(sched_entity_run_node));
+	fprintf(fp, "             cfs_rq_nr_running: %ld\n",
+		OFFSET(cfs_rq_nr_running));
+	fprintf(fp, "            cfs_rq_rb_leftmost: %ld\n",
+		OFFSET(cfs_rq_rb_leftmost));
+	fprintf(fp, "         cfs_rq_tasks_timeline: %ld\n",
+		OFFSET(cfs_rq_tasks_timeline));
+	fprintf(fp, "                  rt_rq_active: %ld\n",
+		OFFSET(rt_rq_active));
+	fprintf(fp, "                pcpu_info_vcpu: %ld\n",
+		OFFSET(pcpu_info_vcpu));
+	fprintf(fp, "                pcpu_info_idle: %ld\n",
+		OFFSET(pcpu_info_idle));
+	fprintf(fp, "                vcpu_struct_rq: %ld\n",
+		OFFSET(vcpu_struct_rq));
+
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
         fprintf(fp, "              free_area_struct: %ld\n", 
@@ -6603,6 +7036,10 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "                   array_cache: %ld\n", SIZE(array_cache));
         fprintf(fp, "                 kmem_bufctl_t: %ld\n", 
 		SIZE(kmem_bufctl_t));
+        fprintf(fp, "                    kmem_cache: %ld\n", SIZE(kmem_cache));
+        fprintf(fp, "               kmem_cache_node: %ld\n", SIZE(kmem_cache_node));
+        fprintf(fp, "                kmem_cache_cpu: %ld\n", SIZE(kmem_cache_cpu));
+
         fprintf(fp, "              swap_info_struct: %ld\n", 
 		SIZE(swap_info_struct));
         fprintf(fp, "                vm_area_struct: %ld\n", 
@@ -6729,8 +7166,18 @@ dump_offset_table(char *spec, ulong makestruct)
 		SIZE(mem_section));
 	fprintf(fp, "                      pid_link: %ld\n", 
 		SIZE(pid_link));
+	fprintf(fp, "                          upid: %ld\n", 
+		SIZE(upid));
 	fprintf(fp, "                  unwind_table: %ld\n", 
 		SIZE(unwind_table));
+	fprintf(fp, "                        rlimit: %ld\n", 
+		SIZE(rlimit));
+	fprintf(fp, "                        cfs_rq: %ld\n", 
+		SIZE(cfs_rq));
+	fprintf(fp, "                     pcpu_info: %ld\n", 
+		SIZE(pcpu_info));
+	fprintf(fp, "                   vcpu_struct: %ld\n", 
+		SIZE(vcpu_struct));
 
         fprintf(fp, "\n                   array_table:\n");
 	/*
@@ -6784,6 +7231,12 @@ dump_offset_table(char *spec, ulong makestruct)
                 get_array_length("prio_array.queue", NULL, SIZE(list_head)));
 	fprintf(fp, "            height_to_maxindex: %d\n",
 		ARRAY_LENGTH(height_to_maxindex));
+	fprintf(fp, "                      pid_hash: %d\n",
+		ARRAY_LENGTH(pid_hash));
+	fprintf(fp, "               kmem_cache_node: %d\n",
+		ARRAY_LENGTH(kmem_cache_node));
+	fprintf(fp, "           kmem_cache_cpu_slab: %d\n",
+		ARRAY_LENGTH(kmem_cache_cpu_slab));
 
 	if (spec) {
 		int in_size_table, in_array_table, arrays, offsets, sizes;
@@ -7224,6 +7677,9 @@ calculate_load_order_v2(struct load_module *lm, bfd *bfd, int dynamic,
 	char *secname;
 	int i;
 
+	if ((store = bfd_make_empty_symbol(bfd)) == NULL)
+		error(FATAL, "bfd_make_empty_symbol() failed\n");
+
 	s1 = lm->mod_symtable;
 	s2 = lm->mod_symend;
 	while (s1 < s2) {
@@ -7511,19 +7967,33 @@ static int
 add_symbol_file(struct load_module *lm)
 {
         struct gnu_request request, *req;
-	char buf[BUFSIZE];
+        char buf[BUFSIZE];
+        int i, len;
+        char *secname;
+
+	for (i = len = 0; i < lm->mod_sections; i++)
+	{
+		secname = lm->mod_section_data[i].name;
+		if ((lm->mod_section_data[i].flags & SEC_FOUND) &&
+		    !STREQ(secname, ".text")) {
+			sprintf(buf, " -s %s 0x%lx", secname, 
+				lm->mod_section_data[i].offset + lm->mod_base);
+			len += strlen(buf);
+		}
+	}
 
 	req = &request;
 	BZERO(req, sizeof(struct gnu_request));
         req->command = GNU_ADD_SYMBOL_FILE;
 	req->addr = (ulong)lm;
-	req->buf = buf;
+	req->buf = GETBUF(len+BUFSIZE);
 	if (!CRASHDEBUG(1))
 		req->fp = pc->nullfp;
 
 	st->flags |= ADD_SYMBOL_FILE;
-	gdb_interface(req); 
+	gdb_interface(req);
 	st->flags &= ~ADD_SYMBOL_FILE;
+	FREEBUF(req->buf);
 
 	sprintf(buf, "set complaints 0");
 	gdb_pass_through(buf, NULL, 0);
@@ -8364,6 +8834,10 @@ patch_kernel_symbol(struct gnu_request *req)
 	struct syment *sp_array[200], *sp;
 
 	if (req->name == PATCH_KERNEL_SYMBOLS_START) {
+		if (kt->flags & RELOC_FORCE)
+			error(WARNING, 
+			    "\nkernel relocated [%ldMB]: patching %ld gdb minimal_symbol values\n",
+				kt->relocate >> 20, st->symcnt);
                 fprintf(fp, (pc->flags & SILENT) || !(pc->flags & TTY) ? "" :
                  "\nplease wait... (patching %ld gdb minimal_symbol values) ",
 			st->symcnt);
@@ -8542,7 +9016,8 @@ datatype_error(ulong *retaddr, char *errmsg, char *func, char *file, int line)
         if (pc->flags & DROP_CORE)
         	drop_core("DROP_CORE flag set: forcing a segmentation fault\n");
 	
-	gdb_readnow_warning();
+	if (CRASHDEBUG(1))
+		gdb_readnow_warning();
 
 	if (pc->flags & RUNTIME) {
 		sprintf(buf, "%s\n%s  FILE: %s  LINE: %d  FUNCTION: %s()\n",
