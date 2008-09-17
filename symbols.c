@@ -49,6 +49,7 @@ static void find_mod_etext(struct load_module *);
 static long rodata_search(ulong *, ulong);
 static int ascii_long(ulong word);
 static int is_bfd_format(char *); 
+static int is_binary_stripped(char *);
 static int namespace_ctl(int, struct namespace *, void *, void *);
 static void symval_hash_init(void);
 static struct syment *symval_hash_search(ulong);
@@ -1311,6 +1312,14 @@ store_module_symbols_v2(ulong total, int mods_installed)
 			&st->ext_module_symtable[mcnt], buf2);
 		lm_mcnt = mcnt;
 		mcnt++;
+
+		if (nsyms && !IN_MODULE(syms, lm)) {
+			error(WARNING, 
+			    "[%s] module.syms outside of module "
+			    "address space (%lx)\n\n",
+				lm->mod_name, syms);
+			nsyms = 0;
+		}
 
 		if (nsyms) {
 			modsymbuf = GETBUF(sizeof(struct kernel_symbol)*nsyms);
@@ -2711,6 +2720,33 @@ is_bfd_format(char *filename)
         return TRUE;
 }
 
+static int
+is_binary_stripped(char *filename)
+{
+#if defined(GDB_6_0) || defined(GDB_6_1)
+        struct bfd *bfd;
+#else
+        struct _bfd *bfd;
+#endif
+	int number_of_symbols;
+
+	if ((bfd = bfd_openr(filename, NULL)) == NULL) {
+		error(INFO, "cannot open ELF file: %s\n", filename);
+		return FALSE;
+	}
+
+	if (!bfd_check_format(bfd, bfd_object)) {
+		error(INFO, "invalid ELF file: %s\n", filename);
+		bfd_close(bfd);
+		return FALSE;
+	}
+
+	number_of_symbols = bfd_canonicalize_symtab(bfd, NULL);
+
+	bfd_close(bfd);
+	
+	return (number_of_symbols == 0);
+}
 
 /*
  *  This command may be used to:
@@ -6252,6 +6288,8 @@ dump_offset_table(char *spec, ulong makestruct)
 
         fprintf(fp, "                    page_inuse: %ld\n",
                 OFFSET(page_inuse));
+        fprintf(fp, "                  page_objects: %ld\n",
+                OFFSET(page_objects));
         fprintf(fp, "                     page_slab: %ld\n",
                 OFFSET(page_slab));
         fprintf(fp, "               page_first_page: %ld\n",
@@ -6612,6 +6650,8 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(kmem_cache_node));
         fprintf(fp, "           kmem_cache_cpu_slab: %ld\n",
                 OFFSET(kmem_cache_cpu_slab));
+        fprintf(fp, "                 kmem_cache_oo: %ld\n",
+                OFFSET(kmem_cache_oo));
 
         fprintf(fp, "    kmem_cache_node_nr_partial: %ld\n",
                 OFFSET(kmem_cache_node_nr_partial));
@@ -8913,8 +8953,8 @@ OFFSET_option(long offset1, long offset2, char *func, char *file, int line,
 		return offset2;
 
 	if (pc->flags & DATADEBUG) {
-        	ulong retaddr[4] = { 0 };
-		save_return_address(retaddr);
+        	ulong retaddr[NUMBER_STACKFRAMES] = { 0 };
+		SAVE_RETURN_ADDRESS(retaddr);
 		sprintf(errmsg, 	
 		    "invalid (optional) structure member offsets: %s or %s",
 			item1, item2);
@@ -8936,8 +8976,8 @@ SIZE_option(long size1, long size2, char *func, char *file, int line,
                 return size2;
 
         if (pc->flags & DATADEBUG) {
-        	ulong retaddr[4] = { 0 };
-		save_return_address(retaddr);
+        	ulong retaddr[NUMBER_STACKFRAMES] = { 0 };
+		SAVE_RETURN_ADDRESS(retaddr);
 		sprintf(errmsg, "invalid (optional) structure sizes: %s or %s",
 			item1, item2);
                 datatype_error(retaddr, errmsg, func, file, line);
@@ -8964,8 +9004,8 @@ OFFSET_verify(long offset, char *func, char *file, int line, char *item)
 		return offset;
 
 	if (offset < 0) {
-        	ulong retaddr[4] = { 0 };
-		save_return_address(retaddr);
+        	ulong retaddr[NUMBER_STACKFRAMES] = { 0 };
+		SAVE_RETURN_ADDRESS(retaddr);
 		sprintf(errmsg, "invalid structure member offset: %s",
 			item);
 		datatype_error(retaddr, errmsg, func, file, line);
@@ -8982,8 +9022,8 @@ SIZE_verify(long size, char *func, char *file, int line, char *item)
                 return size;
 
         if (size < 0) {
-        	ulong retaddr[4] = { 0 };
-		save_return_address(retaddr);
+        	ulong retaddr[NUMBER_STACKFRAMES] = { 0 };
+		SAVE_RETURN_ADDRESS(retaddr);
 		sprintf(errmsg, "invalid structure size: %s", item);
                 datatype_error(retaddr, errmsg, func, file, line);
         }
@@ -9040,9 +9080,10 @@ dump_trace(ulong *retaddr)
 	char *arglist[MAXARGS];
 	char buf[BUFSIZE];
 	FILE *pipe;
-	ulong vaddr, lookfor;
-	ulong last_vaddr;
+	ulong vaddr, size, lookfor;
+	ulong last_vaddr, last_size;
 	char symbol[BUFSIZE];
+	const char *nm_call;
 
 	fflush(fp);
 	fflush(stdout);
@@ -9051,7 +9092,7 @@ dump_trace(ulong *retaddr)
 	thisfile = get_thisfile();
 
 	fprintf(stderr, "[%s] error trace: ", thisfile);
-        for (i = 3; i >= 0; i--) {
+        for (i = (NUMBER_STACKFRAMES-1); i >= 0; i--) {
                 if (retaddr[i])
                         fprintf(stderr, "%s%lx%s",
                                 i == 3 ? "" : "=> ",
@@ -9065,11 +9106,16 @@ dump_trace(ulong *retaddr)
 		return;
 	}
 
-        for (i = 0; i < 4; i++) {
+	if (is_binary_stripped(thisfile))
+		nm_call = "/usr/bin/nm -DSBn %s";
+	else
+		nm_call = "/usr/bin/nm -BSn %s";
+
+        for (i = 0; i < NUMBER_STACKFRAMES; i++) {
 		if (!(lookfor = retaddr[i]))
 			continue;
 
-		sprintf(buf, "/usr/bin/nm -Bn %s", thisfile);
+		sprintf(buf, nm_call, thisfile);
 	        if (!(pipe = popen(buf, "r"))) {
 			perror("pipe");
 			break;
@@ -9078,20 +9124,27 @@ dump_trace(ulong *retaddr)
 		last_vaddr = 0;
 		BZERO(symbol, BUFSIZE);
 
-	        while (fgets(buf, 80, pipe)) {
+	        while (fgets(buf, BUFSIZE, pipe)) {
 			c = parse_line(strip_linefeeds(buf), arglist);
-			if (c != 3)
+			if (c != 4)
 				continue;
 			vaddr = htol(arglist[0], FAULT_ON_ERROR, NULL);
+			size = htol(arglist[1], FAULT_ON_ERROR, NULL);
 			if (vaddr > lookfor) {
-				fprintf(stderr, "%s  %lx: %s+%ld\n",
-					i == 0 ? "\n" : "", 
-					lookfor, symbol, 
-					lookfor-last_vaddr);
+				if ((lookfor - last_vaddr) > last_size)
+					fprintf(stderr, "%s  %lx: (undetermined)\n",
+						i == 0 ? "\n" : "", 
+						lookfor);
+				else
+					fprintf(stderr, "%s  %lx: %s+%ld\n",
+						i == 0 ? "\n" : "", 
+						lookfor, symbol, 
+						lookfor-last_vaddr);
 				break;
 			}
-			strcpy(symbol, arglist[2]);
+			strcpy(symbol, arglist[3]);
 			last_vaddr = vaddr;
+			last_size = size;
 		}
 
 		pclose(pipe);

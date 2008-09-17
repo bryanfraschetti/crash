@@ -98,6 +98,8 @@ static void dump_kmem_cache_slub(struct meminfo *);
 static void dump_kmem_cache_info_v2(struct meminfo *);
 static void kmem_cache_list_slub(void);
 static ulong get_cpu_slab_ptr(struct meminfo *, int, ulong *);
+static unsigned int oo_order(ulong);
+static unsigned int oo_objects(ulong);
 static char *vaddr_to_kmem_cache(ulong, char *, int);
 static ulong vaddr_to_slab(ulong);
 static void do_slab_chain(int, struct meminfo *);
@@ -320,6 +322,9 @@ vm_init(void)
 	MEMBER_OFFSET_INIT(block_device_bd_disk, "block_device", "bd_disk");
 	MEMBER_OFFSET_INIT(inode_i_mapping, "inode", "i_mapping");
 	MEMBER_OFFSET_INIT(address_space_nrpages, "address_space", "nrpages");
+	if (INVALID_MEMBER(address_space_nrpages))
+		MEMBER_OFFSET_INIT(address_space_nrpages, "address_space", "__nrpages");
+
 	MEMBER_OFFSET_INIT(gendisk_major, "gendisk", "major");
 	MEMBER_OFFSET_INIT(gendisk_fops, "gendisk", "fops");
 	MEMBER_OFFSET_INIT(gendisk_disk_name, "gendisk", "disk_name");
@@ -469,6 +474,10 @@ vm_init(void)
 		ANON_MEMBER_OFFSET_INIT(page_slab, "page", "slab");
 		ANON_MEMBER_OFFSET_INIT(page_first_page, "page", "first_page");
 		ANON_MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
+		if (INVALID_MEMBER(kmem_cache_objects)) {
+			MEMBER_OFFSET_INIT(kmem_cache_oo, "kmem_cache", "oo");
+			ANON_MEMBER_OFFSET_INIT(page_objects, "page", "objects");
+		}
 		if (VALID_MEMBER(kmem_cache_node)) {
                 	ARRAY_LENGTH_INIT(len, NULL, "kmem_cache.node", NULL, 0);
 			vt->flags |= CONFIG_NUMA;
@@ -10379,7 +10388,10 @@ kmem_search(struct meminfo *mi)
 mem_map:
 	mi->flags = orig_flags;
 	pc->curcmd_flags &= ~HEADER_PRINTED;
-        dump_mem_map(mi);
+	if (vaddr != BADADDR)
+		dump_mem_map(mi);
+	else
+		mi->retval = FALSE;
 
 	if (!mi->retval)
 		fprintf(fp, "%llx: %s address not found in mem map\n", 
@@ -10934,6 +10946,11 @@ cmd_search(void)
                 switch(c)
                 {
 		case 'u':
+			if (XEN_HYPER_MODE())
+				error(FATAL, 
+ 			 	    "-u option is not applicable to the "
+				    "Xen hypervisor\n");
+
 			if (!sflag) {
 				address_space_start(CURRENT_CONTEXT(),&start);
 				sflag++;
@@ -10943,6 +10960,11 @@ cmd_search(void)
 			break;
 
 		case 'k':
+			if (XEN_HYPER_MODE())
+				error(FATAL, 
+ 			 	    "-k option is not applicable to the "
+				    "Xen hypervisor\n");
+
 			if (!sflag) {
 				start = machdep->kvbase;
 				if (machine_type("IA64") &&
@@ -10984,6 +11006,14 @@ cmd_search(void)
                 }
         }
 
+	if (XEN_HYPER_MODE()) {
+		memtype = KVADDR;
+		if (!sflag)
+			error(FATAL, 
+				"the \"-s start\" option is required for"
+				" the Xen hypervisor\n");
+	}
+
         if (argerrs || !sflag || !args[optind] || (len && end))
                 cmd_usage(pc->curcmd, SYNOPSIS);
 
@@ -11023,7 +11053,9 @@ cmd_search(void)
 			break;
 
 		case KVADDR:
-			if (vt->vmalloc_start < machdep->identity_map_base)
+			if (XEN_HYPER_MODE())
+				end = (ulong)(-1);
+			else if (vt->vmalloc_start < machdep->identity_map_base)
 				end = (ulong)(-1);
 			else {
 				meminfo.memtype = KVADDR;
@@ -11042,6 +11074,8 @@ cmd_search(void)
 	switch (memtype)
 	{
 	case UVADDR:
+		if (is_kernel_thread(CURRENT_TASK()) || !task_mm(CURRENT_TASK(), TRUE))
+			error(FATAL, "current context has no user address space\n");
 		if (end > uvaddr_end) {
 			error(INFO, 
 	          "address range starts in user space and ends kernel space\n");
@@ -11097,6 +11131,20 @@ search(ulong start, ulong end, ulong mask, int memtype, ulong *value, int vcnt)
 		if (LKCD_DUMPFILE())
 			set_lkcd_nohash();
 
+		/*
+		 *  Keep it virtual for Xen hypervisor.
+		 */
+		if (XEN_HYPER_MODE()) {
+                	if (!readmem(pp, KVADDR, pagebuf, PAGESIZE(),
+                    	    "search page", RETURN_ON_ERROR|QUIET)) {
+				if (CRASHDEBUG(1))
+					fprintf(fp, 
+					    "search suspended at: %lx\n", pp);
+				return;
+			}
+			goto virtual;
+		}
+
                 switch (memtype)
                 {
                 case UVADDR:
@@ -11123,7 +11171,7 @@ search(ulong start, ulong end, ulong mask, int memtype, ulong *value, int vcnt)
 			pp += PAGESIZE();
 			continue;
 		}
-
+virtual:
 		ubp = (ulong *)&pagebuf[next - pp];
 		if (lastpage) {
 			if (end == (ulong)(-1))
@@ -12564,6 +12612,7 @@ sparse_mem_init(void)
 {
 	ulong addr;
 	ulong mem_section_size;
+	int dimension;
 
 	if (!IS_SPARSEMEM())
 		return;
@@ -12575,9 +12624,9 @@ sparse_mem_init(void)
 	if (!MAX_PHYSMEM_BITS())
 		error(FATAL, 
 		    "CONFIG_SPARSEMEM kernels not supported for this architecture\n");
-		
-	if (get_array_length("mem_section", NULL, 0) ==
-	    (NR_MEM_SECTIONS() / _SECTIONS_PER_ROOT_EXTREME()))
+
+	if ((get_array_length("mem_section", &dimension, 0) ==
+	    (NR_MEM_SECTIONS() / _SECTIONS_PER_ROOT_EXTREME())) || !dimension)
 		vt->flags |= SPARSEMEM_EX;
 
 	if (IS_SPARSEMEM_EX()) {
@@ -12611,7 +12660,7 @@ sparse_mem_init(void)
 char *
 read_mem_section(ulong addr)
 {
-	if (!IS_KVADDR(addr))
+	if ((addr == 0) || !IS_KVADDR(addr))
 		return 0;
 	
 	readmem(addr, KVADDR, vt->mem_section, SIZE(mem_section),
@@ -12626,7 +12675,8 @@ nr_to_section(ulong nr)
 	ulong addr;
 	ulong *mem_sec = vt->mem_sec;
 
-	if (!IS_KVADDR(mem_sec[SECTION_NR_TO_ROOT(nr)]))
+	if ((mem_sec[SECTION_NR_TO_ROOT(nr)] == 0) || 
+	    !IS_KVADDR(mem_sec[SECTION_NR_TO_ROOT(nr)]))
 		return 0;
 
 	if (IS_SPARSEMEM_EX())
@@ -12808,14 +12858,17 @@ get_nodes_online(void)
 	    !symbol_exists("node_states")) 
 		return 0;
 
-	if (LKCD_KERNTYPES()) {
-                if ((len = STRUCT_SIZE("nodemask_t")) < 0)
-       			error(FATAL, "cannot determine type nodemask_t\n");
-		mapaddr = symbol_value("node_online_map");
-	} else if (symbol_exists("node_online_map")) {
-		len = get_symbol_type("node_online_map", NULL, &req)
-			== TYPE_CODE_UNDEF ?  sizeof(ulong) : req.length;
-		mapaddr = symbol_value("node_online_map");
+	if (symbol_exists("node_online_map")) {
+		if (LKCD_KERNTYPES()) {
+                	if ((len = STRUCT_SIZE("nodemask_t")) < 0)
+       				error(FATAL,
+					"cannot determine type nodemask_t\n");
+			mapaddr = symbol_value("node_online_map");
+		} else {
+			len = get_symbol_type("node_online_map", NULL, &req)
+			    == TYPE_CODE_UNDEF ?  sizeof(ulong) : req.length;
+			mapaddr = symbol_value("node_online_map");
+		}
 	} else if (symbol_exists("node_states")) {
 		if ((get_symbol_type("node_states", NULL, &req) != TYPE_CODE_ARRAY) ||
 		    !(len = get_array_length("node_states", NULL, 0)) ||
@@ -13443,11 +13496,18 @@ static void
 dump_kmem_cache_slub(struct meminfo *si)
 {
 	int i;
-	ulong name;
+	ulong name, oo;
 	unsigned int size, objsize, objects, order, offset;
 	char *reqname, *p1;
 	char kbuf[BUFSIZE];
 	char buf[BUFSIZE];
+
+	if (INVALID_MEMBER(kmem_cache_node_nr_slabs)) {
+		error(INFO, 
+		    "option requires kmem_cache_node.nr_slabs member!\n"
+		    "(the kernel must be built with CONFIG_SLUB_DEBUG)\n");
+		return;
+	}
 
 	si->cache_count = get_kmem_cache_list(&si->cache_list);
 	si->cache_buf = GETBUF(SIZE(kmem_cache));
@@ -13497,9 +13557,18 @@ dump_kmem_cache_slub(struct meminfo *si)
 
 		objsize = UINT(si->cache_buf + OFFSET(kmem_cache_objsize)); 
 		size = UINT(si->cache_buf + OFFSET(kmem_cache_size)); 
-		objects = UINT(si->cache_buf + OFFSET(kmem_cache_objects)); 
-		order = UINT(si->cache_buf + OFFSET(kmem_cache_order)); 
 		offset = UINT(si->cache_buf + OFFSET(kmem_cache_offset));
+		if (VALID_MEMBER(kmem_cache_objects)) {
+			objects = UINT(si->cache_buf + 
+				OFFSET(kmem_cache_objects)); 
+			order = UINT(si->cache_buf + OFFSET(kmem_cache_order)); 
+		} else if (VALID_MEMBER(kmem_cache_oo)) {
+			oo = ULONG(si->cache_buf + OFFSET(kmem_cache_oo));
+			objects = oo_objects(oo);
+			order = oo_order(oo);
+		} else
+			error(FATAL, "cannot determine "
+			    	"kmem_cache objects/order values\n");
 
 		si->cache = si->cache_list[i];
 		si->curname = buf;
@@ -13618,7 +13687,7 @@ get_kmem_cache_slub_data(long cmd, struct meminfo *si)
 		}
 
 		full_slabs = node_nr_slabs - per_cpu[n] - node_nr_partial;
-		objects = INT(si->cache_buf + OFFSET(kmem_cache_objects));
+		objects = si->objects;
 
 		switch (cmd)
 		{
@@ -13722,10 +13791,10 @@ do_kmem_cache_slub(struct meminfo *si)
 #define DUMP_SLAB_INFO_SLUB() \
       { \
         char b1[BUFSIZE], b2[BUFSIZE]; \
-        fprintf(fp, "  %s  %s  %4d  %5ld  %9d  %4ld\n", \
+        fprintf(fp, "  %s  %s  %4d  %5d  %9d  %4d\n", \
                 mkstring(b1, VADDR_PRLEN, LJUST|LONG_HEX, MKSTR(si->slab)), \
                 mkstring(b2, VADDR_PRLEN, LJUST|LONG_HEX, MKSTR(vaddr)), \
-		node, si->objects, inuse, si->objects - inuse); \
+		node, objects, inuse, objects - inuse); \
       }
 
 static void 
@@ -13733,7 +13802,7 @@ do_slab_slub(struct meminfo *si, int verbose)
 {
 	physaddr_t paddr; 
 	ulong vaddr;
-	ushort inuse; 
+	ushort inuse, objects; 
 	ulong freelist, cpu_freelist, cpu_slab_ptr;
 	int i, cpu_slab, is_free, node;
 	ulong p, q;
@@ -13764,6 +13833,24 @@ do_slab_slub(struct meminfo *si, int verbose)
 	if (!readmem(si->slab + OFFSET(page_freelist), KVADDR, &freelist,
 	    sizeof(void *), "page.freelist", RETURN_ON_ERROR))
 		return;
+	/* 
+	 *  Pre-2.6.27, the object count and order were fixed in the
+	 *  kmem_cache structure.  Now they may change, say if a high
+	 *  order slab allocation fails, so the per-slab object count
+	 *  is kept in the slab.
+	 */
+	if (VALID_MEMBER(page_objects)) {
+		if (!readmem(si->slab + OFFSET(page_objects), KVADDR, &objects,
+		    sizeof(ushort), "page.objects", RETURN_ON_ERROR))
+			return;
+
+		if (CRASHDEBUG(1) && (objects != si->objects))
+			error(NOTE, "%s: slab: %lx oo objects: %ld "
+			    "slab objects: %d\n",
+				si->curname, si->slab, 
+				si->objects, objects);
+	} else
+		objects = (ushort)si->objects;
 
 	if (!verbose) {
 		DUMP_SLAB_INFO_SLUB();
@@ -13814,7 +13901,7 @@ do_slab_slub(struct meminfo *si, int verbose)
 			fprintf(fp, "< SLUB: free list END (%d found) >\n", i);
 	}
 
-	for (p = vaddr; p < vaddr + si->objects * si->size; p += si->size) {
+	for (p = vaddr; p < vaddr + objects * si->size; p += si->size) {
 		is_free = FALSE;
 		for (is_free = 0, q = freelist; q; 
 			q = get_freepointer(si, (void *)q)) {
@@ -14188,6 +14275,22 @@ get_cpu_slab_ptr(struct meminfo *si, int cpu, ulong *cpu_freelist)
 	}
 
 	return cpu_slab_ptr;
+}
+
+/*
+ *  In 2.6.27 kmem_cache.order and kmem_cache.objects were merged
+ *  into the kmem_cache.oo, a kmem_cache_order_objects structure.  
+ *  oo_order() and oo_objects() emulate the kernel functions
+ *  of the same name.
+ */
+static unsigned int oo_order(ulong oo)
+{
+        return (oo >> 16);
+}
+
+static unsigned int oo_objects(ulong oo)
+{
+        return (oo & ((1 << 16) - 1));
 }
 
 #ifdef NOT_USED
