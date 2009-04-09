@@ -1,8 +1,8 @@
 /* memory.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  * Copyright (C) 2002 Silicon Graphics, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -185,6 +185,7 @@ static ulong get_freepointer(struct meminfo *, void *);
 static int count_free_objects(struct meminfo *, ulong);
 char *is_slab_page(struct meminfo *, char *);
 static void do_node_lists_slub(struct meminfo *, ulong, int);
+static void check_devmem_is_allowed(void);
 
 /*
  *  Memory display modes specific to this file.
@@ -644,8 +645,9 @@ vm_init(void)
 
 	if (kernel_symbol_exists("mem_map"))
         	get_symbol_data("max_mapnr", sizeof(ulong), &vt->max_mapnr);
-	get_symbol_data("nr_swapfiles", sizeof(unsigned int), 
-		&vt->nr_swapfiles);
+	if (kernel_symbol_exists("nr_swapfiles"))
+		get_symbol_data("nr_swapfiles", sizeof(unsigned int), 
+			&vt->nr_swapfiles);
 
 	STRUCT_SIZE_INIT(page, "page");
 	STRUCT_SIZE_INIT(free_area, "free_area");
@@ -1086,6 +1088,7 @@ struct memloc {                  /* common holder of read memory */
         uint16_t u16;
         uint32_t u32;
         uint64_t u64;
+        uint64_t limit64;
 };
 
 static void
@@ -1137,6 +1140,7 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype)
 			addr, count, flag, addrtype);
 
 	origaddr = addr;
+	BZERO(&mem, sizeof(struct memloc));
 
 	switch (flag & (DISPLAY_TYPES))
 	{
@@ -1146,6 +1150,8 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype)
 		location = &mem.u64;
 		sprintf(readtype, "64-bit %s", addrtype); 
 		per_line = ENTRIES_64; 
+		if (machine_type("IA64"))
+			mem.limit64 = kt->end;
 		break;
 
 	case DISPLAY_32:
@@ -1197,10 +1203,10 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype)
 	        case DISPLAY_64:
 			if ((flag & (HEXADECIMAL|SYMBOLIC|DISPLAY_DEFAULT)) ==
 			    (HEXADECIMAL|SYMBOLIC|DISPLAY_DEFAULT)) {
-				if (in_ksymbol_range(mem.u64) &&
+				if ((!mem.limit64 || (mem.u64 <= mem.limit64)) && 
+				    in_ksymbol_range(mem.u64) &&
 				    strlen(value_to_symstr(mem.u64, buf, 0))) {
-					fprintf(fp, "%-16s ",
-                                            value_to_symstr(mem.u64, buf, 0));
+					fprintf(fp, "%-16s ", buf);
 					linelen += strlen(buf)+1;
 					break;
 				}
@@ -1237,9 +1243,7 @@ display_memory(ulonglong addr, long count, ulong flag, int memtype)
 				if (in_ksymbol_range(mem.u32) &&
 				    strlen(value_to_symstr(mem.u32, buf, 0))) {
 					fprintf(fp, INT_PRLEN == 16 ? 
-					    "%-16s " : "%-8s ",
-                                                value_to_symstr(mem.u32,
-						                buf, 0));
+					    "%-16s " : "%-8s ", buf);
 					linelen += strlen(buf)+1;
 					break;
 				}
@@ -1763,6 +1767,10 @@ readmem(ulonglong addr, int memtype, void *buffer, long size,
                 if (cnt > size)
                         cnt = size;
 
+		if (CRASHDEBUG(8))
+			fprintf(fp, "    addr: %llx  paddr: %llx  cnt: %ld\n", 
+				addr, (unsigned long long)paddr, cnt);
+
 		switch (READMEM(fd, bufptr, cnt, 
 		    (memtype == PHYSADDR) || (memtype == XENMACHADDR) ? 0 : addr, paddr))
 		{
@@ -1797,6 +1805,8 @@ readmem_error:
         switch (error_handle)
         {
         case (FAULT_ON_ERROR):
+		if (ACTIVE() && (kt->flags & IN_KERNEL_INIT))
+			check_devmem_is_allowed();
         case (QUIET|FAULT_ON_ERROR):
                 if (pc->flags & IN_FOREACH)
                         RESUME_FOREACH();
@@ -1911,6 +1921,42 @@ write_dev_mem(int fd, void *bufptr, int cnt, ulong addr, physaddr_t paddr)
 		return WRITE_ERROR;
 
 	return cnt;
+}
+
+/*
+ *  The first required reads of memory are done in kernel_init(),
+ *  so if there's a fatal read error of /dev/mem, display a warning
+ *  message if it appears that CONFIG_STRICT_DEVMEM is in effect, 
+ *  which only allows the first 256 pages of physical memory to 
+ *  be accessed:
+ *
+ *    int devmem_is_allowed(unsigned long pagenr)
+ *    {
+ *            if (pagenr <= 256)
+ *                    return 1;
+ *            if (!page_is_ram(pagenr))
+ *                    return 1;
+ *            return 0;
+ *    }
+ */
+static void
+check_devmem_is_allowed(void)
+{
+	long tmp;
+
+	if (STREQ(pc->live_memsrc, "/dev/mem") &&
+	    kernel_symbol_exists("devmem_is_allowed") &&
+	    readmem(256*PAGESIZE(), PHYSADDR, &tmp,
+	    sizeof(long), "devmem_is_allowed - pfn 256",
+	    QUIET|RETURN_ON_ERROR) &&
+	    !(readmem(257*PAGESIZE(), PHYSADDR, &tmp,
+            sizeof(long), "devmem_is_allowed - pfn 257",
+            QUIET|RETURN_ON_ERROR))) {
+		error(INFO, 
+ 	      	    "\nThis kernel may be configured with CONFIG_STRICT_DEVMEM,"
+                    " which\n       renders /dev/mem unusable as a live memory "
+                    "source.\n\n");
+	}
 }
 
 /*
@@ -2974,7 +3020,7 @@ do_vm_flags(ulong flags)
 #define VM_REF_CHECK_DECVAL(X,V) \
    (DO_REF_SEARCH(X) && ((X)->cmdflags & VM_REF_NUMBER) && ((X)->decval == (V)))
 #define VM_REF_CHECK_STRING(X,S) \
-   (DO_REF_SEARCH(X) && (S) && FILENAME_COMPONENT((S),(X)->str))
+   (DO_REF_SEARCH(X) && (string_exists(S)) && FILENAME_COMPONENT((S),(X)->str))
 #define VM_REF_FOUND(X)    ((X) && ((X)->cmdflags & VM_REF_HEADER))
 
 ulong
@@ -3366,15 +3412,12 @@ clear_vma_cache(void)
 void
 get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 {
-	int rdflags;
 	struct task_context *tc;
 
 	BZERO(tm, sizeof(struct task_mem_usage));
 
 	if (IS_ZOMBIE(task) || IS_EXITING(task)) 
 		return;
-
-	rdflags = ACTIVE() ? (QUIET|RETURN_ON_ERROR) : RETURN_ON_ERROR;
 
 	tc = task_to_context(task);
 
@@ -7540,12 +7583,16 @@ kmem_cache_s_array_nodes:
 		for (i = 0; i < vt->kmem_cache_len_nodes && start_address[i]; i++) {
 			if (readmem(start_address[i] + OFFSET(kmem_list3_shared), 
 			    KVADDR, &shared, sizeof(void *),
-			    "kmem_list3 shared", RETURN_ON_ERROR|QUIET) &&
-			    readmem(shared + OFFSET(array_cache_limit),
+			    "kmem_list3 shared", RETURN_ON_ERROR|QUIET)) {
+				if (!shared)
+					break;
+			} 
+			if (readmem(shared + OFFSET(array_cache_limit),
 	       		    KVADDR, &limit, sizeof(int), "shared array_cache limit",
 		            RETURN_ON_ERROR|QUIET)) {
 				if (limit > max_limit)
 					max_limit = limit;
+				break;
 			}
 		}
 	}
@@ -8946,7 +8993,7 @@ do_slab_chain_percpu_v2(long cmd, struct meminfo *si)
 static void
 do_slab_chain_percpu_v2_nodes(long cmd, struct meminfo *si)
 {
-	int i, tmp, s;
+	int i, tmp, s, node;
 	int list_borked;
 	char *slab_buf;
 	ulong specified_slab;
@@ -8975,6 +9022,14 @@ do_slab_chain_percpu_v2_nodes(long cmd, struct meminfo *si)
 		slab_buf = GETBUF(SIZE(slab));
 		for (index=0; (index < vt->kmem_cache_len_nodes) && start_address[index]; index++)
 		{ 
+			if (vt->flags & NODES_ONLINE) {
+				node = next_online_node(index);
+				if (node < 0)
+					break;
+				if (node != index)
+					continue;
+			}
+
 			slab_chains[0] = start_address[index] + OFFSET(kmem_list3_slabs_partial);
 			slab_chains[1] = start_address[index] + OFFSET(kmem_list3_slabs_full);
 		        slab_chains[2] = start_address[index] + OFFSET(kmem_list3_slabs_free);
@@ -9076,6 +9131,14 @@ do_slab_chain_percpu_v2_nodes(long cmd, struct meminfo *si)
 		slab_buf = GETBUF(SIZE(slab));
 		for (index=0; (index < vt->kmem_cache_len_nodes) && start_address[index]; index++)
 		{ 
+			if (vt->flags & NODES_ONLINE) {
+				node = next_online_node(index);
+				if (node < 0)
+					break;
+				if (node != index)
+					continue;
+			}
+
 			slab_chains[0] = start_address[index] + OFFSET(kmem_list3_slabs_partial);
 			slab_chains[1] = start_address[index] + OFFSET(kmem_list3_slabs_full);
 		        slab_chains[2] = start_address[index] + OFFSET(kmem_list3_slabs_free);
@@ -10157,7 +10220,7 @@ gather_cpudata_list_v2_nodes(struct meminfo *si, int index)
 	    sizeof(ulong) * vt->kmem_cache_len_nodes , "array nodelist array", 
 	    RETURN_ON_ERROR) ||  
 	    !readmem(start_address[index] + OFFSET(kmem_list3_shared), KVADDR, &shared,
-	     sizeof(void *), "kmem_list3 shared", RETURN_ON_ERROR|QUIET) ||
+	     sizeof(void *), "kmem_list3 shared", RETURN_ON_ERROR|QUIET) || !shared ||
 	    !readmem(shared + OFFSET(array_cache_avail), KVADDR, &avail, sizeof(int), 
 	    "shared array_cache avail", RETURN_ON_ERROR|QUIET) || !avail) {
 		FREEBUF(start_address);
@@ -11297,7 +11360,9 @@ next_kpage(ulong vaddr, ulong *nextvaddr)
         if (vaddr < vaddr_orig)  /* wrapped back to zero? */
                 return FALSE;
 
-	if (IS_VMALLOC_ADDR(vaddr_orig)) {
+	if (IS_VMALLOC_ADDR(vaddr_orig) || 
+	    (machine_type("IA64") && IS_VMALLOC_ADDR(vaddr))) {
+
 		if (IS_VMALLOC_ADDR(vaddr) && 
 		    (vaddr < last_vmalloc_address())) {
 			if (machine_type("X86_64")) 
@@ -12328,6 +12393,7 @@ memory_page_size(void)
 
 	case DEVMEM:                      
 	case MEMMOD:
+	case CRASHBUILTIN:
 		psz = (uint)getpagesize();  
 		break;
 

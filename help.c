@@ -1,8 +1,8 @@
 /* help.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -678,6 +678,8 @@ char *help_set[] = {
 "        dumpfile  filename     name of core dumpfile (from .%src file only).",
 "   zero_excluded  on | off     controls whether excluded pages from a dumpfile",
 "                               should return zero-filled memory.",
+"       null-stop  on | off     if on, gdb's printing of character arrays will",
+"                               stop at the first NULL encountered.", 
 " ",
 "  Internal variables may be set in four manners:\n",
 "    1. entering the set command in $HOME/.%src.",
@@ -724,6 +726,7 @@ char *help_set[] = {
 "          namelist: vmlinux",
 "          dumpfile: vmcore",
 "     zero_excluded: off",
+"         null-stop: on",
 " ",
 "  Show the current context:\n",
 "    %s> set",
@@ -738,10 +741,14 @@ NULL
 char *help_p[] = {
 "p",
 "print the value of an expression",
-"expression",
+"[-x|-d][-u] expression",
 "  This command passes its arguments on to gdb \"print\" command for evaluation.",
 "",
-"    expression   The expression to be evaluated.\n",
+"    expression   The expression to be evaluated.",
+"            -x  override default output format with hexadecimal format.",
+"            -d  override default output format with decimal format.",
+"            -u  the expression evaluates to a user address reference.", 
+"",
 "  The default output format is decimal, but that can be changed at any time",
 "  with the two built-in aliases \"hex\" and \"dec\".  Alternatively, there",
 "  are two other built-in aliases, \"px\" and \"pd\", which force the command",
@@ -1487,6 +1494,13 @@ char *help_extend[] = {
 "                      one object file may be entered.",
 "    -u shared-object  unload the specified shared object file; if no file",
 "                      arguments are specified, unload all objects.", 
+"\n  If the shared-object filename is not expressed with a fully-qualified",
+"  pathname, the following directories will be searched in the order shown,",
+"  and the first instance of the file that is found will be selected:\n",
+"     1. the current working directory",
+"     2. the directory specified in the CRASH_EXTENSIONS environment variable",
+"     3. /usr/lib64/crash/extensions (64-bit architectures)",
+"     4. /usr/lib/crash/extensions", 
 "\n  If no arguments are entered, the current set of shared object files and ",
 "  a list of their commands will be displayed.  The registered commands",
 "  contained in each shared object file will appear automatically in the ",
@@ -5207,7 +5221,7 @@ display_version(void)
 static 
 char *version_info[] = {
 
-"Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008  Red Hat, Inc.",
+"Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009  Red Hat, Inc.",
 "Copyright (C) 2004, 2005, 2006  IBM Corporation", 
 "Copyright (C) 1999-2006  Hewlett-Packard Co",
 "Copyright (C) 2005, 2006  Fujitsu Limited",

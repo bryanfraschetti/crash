@@ -1,7 +1,7 @@
 /* x86_64.c -- core analysis suite
  *
- * Copyright (C) 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -2271,7 +2271,7 @@ x86_64_in_irqstack(struct bt_info *bt)
 #define STACK_TRANSITION_ERRMSG_E_P \
 "cannot transition from exception stack to current process stack:\n    exception stack pointer: %lx\n      process stack pointer: %lx\n         current_stack_base: %lx\n"
 #define STACK_TRANSITION_ERRMSG_I_P \
-"cannot transition from IRQ stack to current process stack:\n        IRQ stack pointer: %lx\n    process stack pointer: %lx\n       current stack base: %lx"
+"cannot transition from IRQ stack to current process stack:\n        IRQ stack pointer: %lx\n    process stack pointer: %lx\n       current stack base: %lx\n"
 
 /*
  *  Low-budget back tracer -- dump text return addresses, following call chain
@@ -2316,7 +2316,7 @@ x86_64_low_budget_back_trace_cmd(struct bt_info *bt_in)
 	last_process_stack_eframe = 0;
 	bt->call_target = NULL;
 	rsp = bt->stkptr;
-	if (!rsp) {
+	if (!rsp || !accessible(rsp)) {
 		error(INFO, "cannot determine starting stack pointer\n");
 		return;
 	}
@@ -3741,7 +3741,10 @@ x86_64_get_pc(struct bt_info *bt)
                         OFFSET(thread_struct_rip), KVADDR,
                         &rip, sizeof(void *),
                         "thread_struct rip", FAULT_ON_ERROR);
-                return rip;
+		if (rip)
+			return rip;
+		else
+			return symbol_value("thread_return");
         }
 
         offset = OFFSET(task_struct_thread) + OFFSET(thread_struct_rip);
@@ -3784,6 +3787,10 @@ x86_64_display_idt_table(void)
 	char buf[BUFSIZE];
 	ulong *ip;
 
+	if (INVALID_SIZE(gate_struct)) {
+		option_not_supported('d');
+		return;
+	}
 	idt_table_buf = GETBUF(SIZE(gate_struct) * 256);
         readmem(symbol_value("idt_table"), KVADDR, idt_table_buf, 
 		SIZE(gate_struct) * 256, "idt_table", FAULT_ON_ERROR);

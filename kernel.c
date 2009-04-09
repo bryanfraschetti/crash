@@ -1,8 +1,8 @@
 /* kernel.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -67,6 +67,11 @@ kernel_init()
 	if (pc->flags & KERNEL_DEBUG_QUERY)
 		return;
 
+	kt->flags |= IN_KERNEL_INIT;
+
+        if (!(kt->cpu_flags = (ulong *)calloc(NR_CPUS, sizeof(ulong))))
+                error(FATAL, "cannot malloc cpu_flags array");
+
 	cpu_maps_init();
 
 	kt->stext = symbol_value("_stext");
@@ -102,8 +107,14 @@ kernel_init()
 		}
 		if (machine_type("X86"))
                 	get_symbol_data("max_pfn", sizeof(ulong), &kt->p2m_table_size);
-		if (machine_type("X86_64"))
-                	get_symbol_data("end_pfn", sizeof(ulong), &kt->p2m_table_size);
+		if (machine_type("X86_64")) {
+			/*
+			 * kernel version <  2.6.27 => end_pfn
+			 * kernel version >= 2.6.27 => max_pfn
+			 */
+			if (!try_get_symbol_data("end_pfn", sizeof(ulong), &kt->p2m_table_size))
+				get_symbol_data("max_pfn", sizeof(ulong), &kt->p2m_table_size);
+		}
                 if ((kt->m2p_page = (char *)malloc(PAGESIZE())) == NULL)
                        	error(FATAL, "cannot malloc m2p page.");
 	}
@@ -164,7 +175,15 @@ kernel_init()
 			p2++;
 		*p2 = NULLCHAR;
 		kt->kernel_version[2] = atoi(p1);
-	}
+
+		if (CRASHDEBUG(1))
+			fprintf(fp, "base kernel version: %d.%d.%d\n",
+				kt->kernel_version[0],
+				kt->kernel_version[1],
+				kt->kernel_version[2]);
+	} else
+		error(INFO, "cannot determine base kernel version\n");
+
 
 	verify_version();
 
@@ -196,6 +215,12 @@ kernel_init()
 			NULL, 0);
 		if (symbol_exists("__cpu_idx") &&
 		    symbol_exists("__rq_idx")) {
+			if (!(kt->__cpu_idx = (long *)
+			    calloc(NR_CPUS, sizeof(long))))
+				error(FATAL, "cannot malloc __cpu_idx array");
+			if (!(kt->__rq_idx = (long *)
+			    calloc(NR_CPUS, sizeof(long))))
+				error(FATAL, "cannot malloc __rq_idx array");
 			if (!readmem(symbol_value("__cpu_idx"), KVADDR, 
 		            &kt->__cpu_idx[0], sizeof(long) * NR_CPUS,
                             "__cpu_idx[NR_CPUS]", RETURN_ON_ERROR))
@@ -503,6 +528,8 @@ kernel_init()
 	}
 
 	BUG_bytes_init();
+	
+	kt->flags &= ~IN_KERNEL_INIT;
 }
 
 /*
@@ -1604,11 +1631,14 @@ cmd_bt(void)
 			break;
 
 		case 'o':
+			if (XEN_HYPER_MODE())
+				option_not_supported(c);
 			bt->flags |= BT_OLD_BACK_TRACE;
 			break;
 
 		case 'O':
-			if (!(machine_type("X86") || machine_type("X86_64"))) 
+			if (!(machine_type("X86") || machine_type("X86_64")) ||
+			    XEN_HYPER_MODE()) 
 				option_not_supported(c);
 			else if (kt->flags & USE_OLD_BT) { 
 				/* 
@@ -1644,11 +1674,15 @@ cmd_bt(void)
 			break;
 
 		case 'E':
+			if (XEN_HYPER_MODE())
+				option_not_supported(c);
 			bt->flags |= BT_EFRAME_SEARCH|BT_EFRAME_SEARCH2;
 			bt->hp = &hook;
 			break;
 
 		case 'e':
+			if (XEN_HYPER_MODE())
+				option_not_supported(c);
 			bt->flags |= BT_EFRAME_SEARCH;
 			break;
 
@@ -1738,11 +1772,6 @@ cmd_bt(void)
 		}
 	}
 
-	if (XEN_HYPER_MODE()) {
-		if (bt->flags & BT_EFRAME_SEARCH)
-			argerrs++;
-	}
-
 	if (argerrs)
 		cmd_usage(pc->curcmd, SYNOPSIS);
 
@@ -1783,7 +1812,9 @@ cmd_bt(void)
 					continue;
 				fake_tc.task = xen_hyper_pcpu_to_active_vcpu(c);
 				BT_SETUP(&fake_tc);
-				xen_hyper_print_bt_header(fp, fake_tc.task, subsequent++);
+			        if (!BT_REFERENCE_CHECK(bt))
+					xen_hyper_print_bt_header(fp, fake_tc.task, 
+						subsequent++);
 				back_trace(bt);
 			}
 		} else {
@@ -1794,7 +1825,8 @@ cmd_bt(void)
 				fake_tc.task = XEN_HYPER_VCPU_LAST_CONTEXT()->vcpu;
 			}
 			BT_SETUP(&fake_tc);
-			xen_hyper_print_bt_header(fp, fake_tc.task, 0);
+			if (!BT_REFERENCE_CHECK(bt))
+				xen_hyper_print_bt_header(fp, fake_tc.task, 0);
 			back_trace(bt);
 		}
 		return;
@@ -1809,6 +1841,12 @@ cmd_bt(void)
 				"-a option not supported on a live system\n");
 
 		for (c = 0; c < NR_CPUS; c++) {
+			if (setjmp(pc->foreach_loop_env)) {
+				free_all_bufs();
+				continue;
+			}
+			pc->flags |= IN_FOREACH;
+
 			if ((tc = task_to_context(tt->panic_threads[c]))) {
 				BT_SETUP(tc);
 				if (!BT_REFERENCE_CHECK(bt))
@@ -1816,6 +1854,7 @@ cmd_bt(void)
 				back_trace(bt);
 			}
 		}
+                pc->flags &= ~IN_FOREACH;
 
 		return;
 	}
@@ -1982,7 +2021,7 @@ back_trace(struct bt_info *bt)
 	if (bt->hp) {
 		if (bt->hp->esp && !INSTACK(bt->hp->esp, bt))
 			error(INFO, 
-			    "invalid stack address for this task: %lx\n    (valid range: %lx - %lx)\n",
+			    "non-process stack address for this task: %lx\n    (valid range: %lx - %lx)\n",
 				bt->hp->esp, bt->stackbase, bt->stacktop);
 		eip = bt->hp->eip;
 		esp = bt->hp->esp;
@@ -2044,8 +2083,13 @@ back_trace(struct bt_info *bt)
         		{
         		case BT_HARDIRQ:
 				btloc.hp->eip = symbol_value("do_IRQ");
-                		btloc.hp->esp = ULONG(bt->stackbuf +
-                        	    SIZE(irq_ctx) - (sizeof(unsigned int)*2));
+				if (symbol_exists("__do_IRQ"))
+					btloc.hp->esp = ULONG(bt->stackbuf +
+					    OFFSET(thread_info_previous_esp));
+				else
+					btloc.hp->esp = ULONG(bt->stackbuf +
+					    SIZE(irq_ctx) - 
+					    (sizeof(char *)*2));
 				fprintf(fp, "--- <hard IRQ> ---\n");
                 		break;
 
@@ -2072,7 +2116,7 @@ complete_trace:
 		BCOPY(bt, &btsave, sizeof(struct bt_info));
 
 	if (CRASHDEBUG(4))
-		dump_bt_info(bt);
+		dump_bt_info(bt, "back_trace");
 
 	machdep->back_trace(bt);
 
@@ -2080,7 +2124,15 @@ complete_trace:
 		goto complete_trace;
 
 	if (BT_REFERENCE_FOUND(bt)) {
+#ifdef XEN_HYPERVISOR_ARCH
+		if (XEN_HYPER_MODE())
+			xen_hyper_print_bt_header(fp, bt->task, 0);
+		else
+			print_task_header(fp, task_to_context(bt->task), 0);
+#else
 		print_task_header(fp, task_to_context(bt->task), 0);
+#endif /* XEN_HYPERVISOR_ARCH */
+
 		BCOPY(&btsave, bt, sizeof(struct bt_info));
 		bt->ref = NULL;
 		machdep->back_trace(bt);
@@ -2096,6 +2148,8 @@ static int
 restore_stack(struct bt_info *bt)
 {
 	ulonglong type;
+	struct syment *sp;
+	ulong retvaddr;
 
 	bt->instptr = bt->stkptr = 0;
 	type = 0;
@@ -2103,14 +2157,30 @@ restore_stack(struct bt_info *bt)
 	switch (bt->flags & (BT_HARDIRQ|BT_SOFTIRQ)) 
 	{ 
 	case BT_HARDIRQ:
-		bt->instptr = symbol_value("do_IRQ");
-		bt->stkptr = ULONG(bt->stackbuf + 
-			SIZE(irq_ctx) - (sizeof(unsigned int)*2));
+		retvaddr = ULONG(bt->stackbuf +
+			SIZE(irq_ctx) - sizeof(char *));
+		if ((sp = value_search(retvaddr, NULL)) && 
+			STREQ(sp->name, "do_IRQ"))
+			bt->instptr = retvaddr; 
+		else
+			bt->instptr = symbol_value("do_IRQ");
+		if (symbol_exists("__do_IRQ"))
+            		bt->stkptr = ULONG(bt->stackbuf +
+                     		OFFSET(thread_info_previous_esp));
+		else
+			bt->stkptr = ULONG(bt->stackbuf + 
+				SIZE(irq_ctx) - (sizeof(char *)*2));
 		type = BT_HARDIRQ;
 		break;
 
 	case BT_SOFTIRQ:
-		bt->instptr = symbol_value("do_softirq");
+		retvaddr = ULONG(bt->stackbuf +
+			SIZE(irq_ctx) - sizeof(char *));
+		if ((sp = value_search(retvaddr, NULL)) && 
+			STREQ(sp->name, "do_softirq"))
+			bt->instptr = retvaddr; 
+		else
+			bt->instptr = symbol_value("do_softirq");
                	bt->stkptr = ULONG(bt->stackbuf +
                        	OFFSET(thread_info_previous_esp));
 		type = BT_SOFTIRQ;
@@ -2169,7 +2239,8 @@ gather_text_list(struct bt_info *bt)
 		if ((p1 = strstr(buf, ":"))) {
 			esp = eip = 0;
                 	*p1 = NULLCHAR;
-			if ((esp = htol(buf, RETURN_ON_ERROR, NULL)) != BADADDR)
+			if (((esp = htol(buf, RETURN_ON_ERROR, NULL)) != BADADDR)
+			    && INSTACK(esp, bt))
                                 eip = GET_STACK_ULONG(esp);
 			if (esp && eip) {
 				hooks[cnt].esp = esp;
@@ -2194,8 +2265,9 @@ gather_text_list(struct bt_info *bt)
  *  Debug routine most likely useful from above in back_trace()
  */
 void
-dump_bt_info(struct bt_info *bt)
+dump_bt_info(struct bt_info *bt, char *where)
 {
+	fprintf(fp, "[%lx] %s:\n", (ulong)bt, where);
 	fprintf(fp, "        task: %lx\n", bt->task);
 	fprintf(fp, "       flags: %llx\n", bt->flags);
 	fprintf(fp, "     instptr: %lx\n", bt->instptr);
@@ -2487,7 +2559,10 @@ module_init(void)
 			break;
 
 		case KALLSYMS_V2:
-			numksyms = ULONG(modbuf + OFFSET(module_num_symtab));
+			if (THIS_KERNEL_VERSION >= LINUX(2,6,27))
+				numksyms = UINT(modbuf + OFFSET(module_num_symtab));
+			else
+				numksyms = ULONG(modbuf + OFFSET(module_num_symtab));
 			total += numksyms; 
 			break;
 		}
@@ -2600,8 +2675,12 @@ verify_modules(void)
 				case KMOD_V2:
         				module_name = modbuf + 
 						OFFSET(module_name);
-					mod_size = LONG(modbuf + 
-						OFFSET(module_core_size));
+					if (THIS_KERNEL_VERSION >= LINUX(2,6,27))
+						mod_size = UINT(modbuf +
+							OFFSET(module_core_size));
+					else
+						mod_size = ULONG(modbuf +
+							OFFSET(module_core_size));
                 			if (strlen(module_name) < MAX_MOD_NAME)
                         			strcpy(buf, module_name);
                 			else 
@@ -3192,15 +3271,18 @@ module_objfile_search(char *modref, char *filename, char *tree)
  *  First look for a module based upon its reference name.
  *  If that fails, try replacing any underscores in the
  *  reference name with a dash.  
+ *  If that fails, because of intermingled dashes and underscores, 
+ *  try a regex expression.
  *
  *  Example: module name "dm_mod" comes from "dm-mod.ko" objfile
+ *           module name "dm_region_hash" comes from "dm-region_hash.ko" objfile
  */
 static char *
 find_module_objfile(char *modref, char *filename, char *tree)
 {
 	char * retbuf;
 	char tmpref[BUFSIZE];
-	int c;
+	int i, c;
 
 	retbuf = module_objfile_search(modref, filename, tree);
 
@@ -3209,6 +3291,20 @@ find_module_objfile(char *modref, char *filename, char *tree)
 		for (c = 0; c < BUFSIZE && tmpref[c]; c++)
 			if (tmpref[c] == '_')
 				tmpref[c] = '-';
+		retbuf = module_objfile_search(tmpref, filename, tree);
+	}
+
+	if (!retbuf && (count_chars(modref, '_') > 1)) {
+		for (i = c = 0; modref[i]; i++) {
+			if (modref[i] == '_') {
+				tmpref[c++] = '[';
+				tmpref[c++] = '_';
+				tmpref[c++] = '-';
+				tmpref[c++] = ']';
+			} else
+				tmpref[c++] = modref[i];
+		} 
+		tmpref[c] = NULLCHAR;
 		retbuf = module_objfile_search(tmpref, filename, tree);
 	}
 
@@ -3273,7 +3369,7 @@ void
 dump_log(int msg_level)
 {
 	int i;
-	ulong log_buf, logged_chars;
+	ulong log_buf, log_end;
 	char *buf;
 	char last;
 	ulong index;
@@ -3300,18 +3396,16 @@ dump_log(int msg_level)
 
 	buf = GETBUF(log_buf_len);
 	log_wrap = FALSE;
-	get_symbol_data("logged_chars", sizeof(ulong), &logged_chars);
+	get_symbol_data("log_end", sizeof(ulong), &log_end);
         readmem(log_buf, KVADDR, buf,
         	log_buf_len, "log_buf contents", FAULT_ON_ERROR);
 
-	if (logged_chars < log_buf_len) {
+	if (log_end < log_buf_len)
 		index = 0;
-	} else {
-		get_symbol_data("log_end", sizeof(ulong), &index);
-		index &= log_buf_len-1;
-	} 
+	else
+		index = log_end & (log_buf_len - 1);
 
-	if ((logged_chars < log_buf_len) && (index == 0) && (buf[index] == '<'))
+	if ((log_end < log_buf_len) && (index == 0) && (buf[index] == '<'))
 		loglevel = TRUE;
 	else
 		loglevel = FALSE;
@@ -3840,7 +3934,7 @@ get_NR_syscalls(void)
 void
 dump_kernel_table(int verbose)
 {
-	int i, nr_cpus;
+	int i, j, more, nr_cpus;
         struct new_utsname *uts;
         int others;
 
@@ -3908,6 +4002,8 @@ dump_kernel_table(int verbose)
 		fprintf(fp, "%sRELOC_SET", others++ ? "|" : "");
 	if (kt->flags & RELOC_FORCE)
 		fprintf(fp, "%sRELOC_FORCE", others++ ? "|" : "");
+	if (kt->flags & IN_KERNEL_INIT)
+		fprintf(fp, "%sIN_KERNEL_INIT", others++ ? "|" : "");
 	fprintf(fp, ")\n");
         fprintf(fp, "         stext: %lx\n", kt->stext);
         fprintf(fp, "         etext: %lx\n", kt->etext);
@@ -3953,18 +4049,69 @@ dump_kernel_table(int verbose)
 	fprintf(fp, " runq_siblings: %d\n", kt->runq_siblings);
 	fprintf(fp, "  __rq_idx[NR_CPUS]: ");
 	nr_cpus = kt->kernel_NR_CPUS ? kt->kernel_NR_CPUS : NR_CPUS;
-	for (i = 0; i < nr_cpus; i++) 
+	for (i = 0; i < nr_cpus; i++) {
+		if (!(kt->__rq_idx)) {
+			fprintf(fp, "(unused)");
+			break;
+		}
 		fprintf(fp, "%ld ", kt->__rq_idx[i]);
+		for (j = i, more = FALSE; j < nr_cpus; j++) {
+			if (kt->__rq_idx[j])
+				more = TRUE;
+		}
+		if (!more) {
+			fprintf(fp, "...");
+			break;
+		}
+	}
 	fprintf(fp, "\n __cpu_idx[NR_CPUS]: ");
-	for (i = 0; i < nr_cpus; i++) 
+	for (i = 0; i < nr_cpus; i++) {
+		if (!(kt->__cpu_idx)) {
+			fprintf(fp, "(unused)");
+			break;
+		}
 		fprintf(fp, "%ld ", kt->__cpu_idx[i]);
+		for (j = i, more = FALSE; j < nr_cpus; j++) {
+			if (kt->__cpu_idx[j])
+				more = TRUE;
+		}
+		if (!more) {
+			fprintf(fp, "...");
+			break;
+		}
+	}
 	fprintf(fp, "\n __per_cpu_offset[NR_CPUS]:");
-	for (i = 0; i < nr_cpus; i++) 
+	for (i = 0; i < nr_cpus; i++) {
 		fprintf(fp, "%s%.*lx ", (i % 4) == 0 ? "\n    " : "",
 			LONG_PRLEN, kt->__per_cpu_offset[i]);
+		if ((i % 4) == 0) {
+			for (j = i, more = FALSE; j < nr_cpus; j++) {
+				if (kt->__per_cpu_offset[j])
+					more = TRUE;
+			}
+		}
+		if (!more) {
+			fprintf(fp, "...");
+			break;
+		}
+
+	}
 	fprintf(fp, "\n cpu_flags[NR_CPUS]: ");
-	for (i = 0; i < nr_cpus; i++) 
+	for (i = 0; i < nr_cpus; i++) {
+		if (!(kt->cpu_flags)) {
+			fprintf(fp, "(unused)\n");
+			goto no_cpu_flags;
+		}
 		fprintf(fp, "%lx ", kt->cpu_flags[i]);
+		for (j = i, more = FALSE; j < nr_cpus; j++) {
+			if (kt->cpu_flags[j])
+				more = TRUE;
+		}
+		if (!more) {
+			fprintf(fp, "...");
+			break;
+		}
+	}
 	fprintf(fp, "\n");
 	fprintf(fp, "       cpu_possible_map: ");
 	if (kernel_symbol_exists("cpu_possible_map")) {
@@ -3993,6 +4140,7 @@ dump_kernel_table(int verbose)
 		fprintf(fp, "\n");
 	} else
 		fprintf(fp, "(does not exist)\n");
+no_cpu_flags:
 	others = 0;
 	fprintf(fp, "     xen_flags: %lx (", kt->xen_flags);
         if (kt->xen_flags & WRITABLE_PAGE_TABLES)

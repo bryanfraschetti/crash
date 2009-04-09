@@ -1,8 +1,8 @@
 /* defs.h - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  * Copyright (C) 2002 Silicon Graphics, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -64,7 +64,7 @@
 #define NR_CPUS  (256)
 #endif
 #ifdef X86_64
-#define NR_CPUS  (256)
+#define NR_CPUS  (512)
 #endif
 #ifdef ALPHA
 #define NR_CPUS  (64)
@@ -76,7 +76,7 @@
 #define NR_CPUS  (4096)
 #endif
 #ifdef PPC64
-#define NR_CPUS  (128)
+#define NR_CPUS  (1024)
 #endif
 #ifdef S390
 #define NR_CPUS  (64)
@@ -93,8 +93,10 @@
 
 #define HIST_BLKSIZE  (4096)
 
-#define STREQ(A, B)      (A && B && (strcmp((char *)(A), (char *)(B)) == 0))
-#define STRNEQ(A, B)     (A && B && \
+static inline int string_exists(char *s) { return (s ? TRUE : FALSE); }
+#define STREQ(A, B)      (string_exists((char *)A) && string_exists((char *)B) && \
+	(strcmp((char *)(A), (char *)(B)) == 0))
+#define STRNEQ(A, B)     (string_exists((char *)A) && string_exists((char *)B) && \
         (strncmp((char *)(A), (char *)(B), strlen((char *)(B))) == 0))
 #define BZERO(S, N)      (memset(S, NULLCHAR, N))
 #define BCOPY(S, D, C)   (memcpy(D, S, C))
@@ -185,10 +187,11 @@ struct number_option {
 #define IFILE_ERROR   (0x400000000000000ULL)
 #define KERNTYPES     (0x800000000000000ULL)
 #define MINIMAL_MODE (0x1000000000000000ULL)
+#define CRASHBUILTIN (0x2000000000000000ULL)
 
 #define ACTIVE()            (pc->flags & LIVE_SYSTEM)
 #define DUMPFILE()          (!(pc->flags & LIVE_SYSTEM))
-#define MEMORY_SOURCES (NETDUMP|KDUMP|MCLXCD|LKCD|DEVMEM|S390D|MEMMOD|DISKDUMP|XENDUMP)
+#define MEMORY_SOURCES (NETDUMP|KDUMP|MCLXCD|LKCD|DEVMEM|S390D|MEMMOD|DISKDUMP|XENDUMP|CRASHBUILTIN)
 #define DUMPFILE_TYPES      (DISKDUMP|NETDUMP|KDUMP|MCLXCD|LKCD|S390D|XENDUMP)
 #define REMOTE()            (pc->flags & REMOTE_DAEMON)
 #define REMOTE_ACTIVE()     (pc->flags & REM_LIVE_SYSTEM) 
@@ -471,6 +474,7 @@ struct new_utsname {
 #define RELOC_FORCE          (0x4000000)
 #define ARCH_OPENVZ          (0x8000000)
 #define ARCH_PVOPS          (0x10000000)
+#define IN_KERNEL_INIT      (0x20000000)
 
 #define GCC_VERSION_DEPRECATED (GCC_3_2|GCC_3_2_3|GCC_2_96|GCC_3_3_2|GCC_3_3_3)
 
@@ -509,10 +513,10 @@ struct kernel_table {                   /* kernel data */
 	uint gcc_version[3];
 	int runq_siblings;
 	int kernel_NR_CPUS;
-	long __rq_idx[NR_CPUS];
-	long __cpu_idx[NR_CPUS];
 	long __per_cpu_offset[NR_CPUS];
-	ulong cpu_flags[NR_CPUS];
+	long *__rq_idx;
+	long *__cpu_idx;
+	ulong *cpu_flags;
 #define POSSIBLE  (0x1)
 #define PRESENT   (0x2)
 #define ONLINE    (0x4)
@@ -599,14 +603,14 @@ struct task_table {                      /* kernel/local task table data */
 	ulong retries;
         ulong panicmsg;
         int panic_processor;
-        ulong idle_threads[NR_CPUS];
-        ulong panic_threads[NR_CPUS];
-	ulong panic_ksp[NR_CPUS];
-	ulong active_set[NR_CPUS];
-	ulong hardirq_ctx[NR_CPUS];
-	ulong hardirq_tasks[NR_CPUS];
-	ulong softirq_ctx[NR_CPUS];
-	ulong softirq_tasks[NR_CPUS];
+        ulong *idle_threads;
+        ulong *panic_threads;
+	ulong *active_set;
+	ulong *panic_ksp;
+	ulong *hardirq_ctx;
+	ulong *hardirq_tasks;
+	ulong *softirq_ctx;
+	ulong *softirq_tasks;
         ulong panic_task;
 	ulong this_task;
 	int pidhash_len;
@@ -2069,7 +2073,8 @@ struct load_module {
 #define TIF_SIGPENDING  (2)
 
 // CONFIG_X86_PAE 
-#define _SECTION_SIZE_BITS_PAE	30
+#define _SECTION_SIZE_BITS_PAE_ORIG	30
+#define _SECTION_SIZE_BITS_PAE_2_6_26	29
 #define _MAX_PHYSMEM_BITS_PAE	36
 
 // !CONFIG_X86_PAE   
@@ -2773,6 +2778,7 @@ struct efi_memory_desc_t {
 #define INT_DEC      (0x20)
 #define INT_HEX      (0x40)
 #define LONGLONG_HEX (0x80)
+#define ZERO_FILL   (0x100)
 
 #define INIT_TIME (1)
 #define RUN_TIME  (2)
@@ -3138,6 +3144,7 @@ void dump_build_data(void);
 #define machdep_init(X) ppc64_init(X)
 #endif
 int clean_exit(int);
+int untrusted_file(FILE *, char *);
 
 /*
  *  cmdline.c
@@ -3623,7 +3630,7 @@ void display_sys_stats(void);
 char *get_uptime(char *, ulonglong *);
 void clone_bt_info(struct bt_info *, struct bt_info *, struct task_context *);
 void dump_kernel_table(int);
-void dump_bt_info(struct bt_info *);
+void dump_bt_info(struct bt_info *, char *where);
 void dump_log(int);
 void set_cpu(int);
 void clear_machdep_cache(void);
@@ -4118,6 +4125,8 @@ void xen_kdump_p2m_mfn(char *);
 int is_sadump_xen(void);
 void set_xen_phys_start(char *);
 ulong xen_phys_start(void);
+int xen_major_version(void);
+int xen_minor_version(void);
 
 /*
  *  diskdump.c
@@ -4508,6 +4517,7 @@ extern int prettyprint_structs;
 extern int prettyprint_arrays;
 extern int repeat_count_threshold;
 extern unsigned int print_max;
+extern int stop_print_at_null;
 
 /*
  *  gdb/utils.c

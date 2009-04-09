@@ -1,8 +1,8 @@
 /* filesys.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 
 #include "defs.h"
 #include <linux/major.h>
+#include <regex.h>
 
 static void show_mounts(ulong, int, struct task_context *);
 static int find_booted_kernel(void);
@@ -76,6 +77,7 @@ static struct filesys_table *ft = &filesys_table;
 #define DUMP_FULL_NAME   1
 #define DUMP_INODE_ONLY  2
 #define DUMP_DENTRY_ONLY 4
+#define DUMP_EMPTY_FILE  8
 
 /*
  *  Open the namelist, dumpfile and output devices.
@@ -935,9 +937,10 @@ search_directory_tree(char *directory, char *file)
 {
 	char command[BUFSIZE];
 	char buf[BUFSIZE];
-	char *retbuf;
+	char *retbuf, *start, *end, *module;
 	FILE *pipe;
-	int done;
+	regex_t regex;
+	int regex_used, done;
 
 	if (!file_exists("/usr/bin/find", NULL) || 
 	    !file_exists("/bin/echo", NULL) ||
@@ -956,20 +959,34 @@ search_directory_tree(char *directory, char *file)
 
 	done = FALSE;
 	retbuf = NULL;
+	regex_used = ((start = strstr(file, "[")) && 
+		(end = strstr(file, "]")) && (start < end) &&
+		(regcomp(&regex, file, 0) == 0));
 
         while (fgets(buf, BUFSIZE-1, pipe) || !done) {
                 if (STREQ(buf, "search done\n")) {
                         done = TRUE;
                         break;
                 }
-                if (!retbuf &&
+                if (!retbuf && !regex_used &&
                     STREQ((char *)basename(strip_linefeeds(buf)), file)) {
                         retbuf = GETBUF(strlen(buf)+1);
                         strcpy(retbuf, buf);
                 }
+		if (!retbuf && regex_used) {
+			module = basename(strip_linefeeds(buf));
+			if (regexec(&regex, module, 0, NULL, 0) == 0) {
+				retbuf = GETBUF(strlen(buf)+1);
+				strcpy(retbuf, buf);
+			}
+		}
         }
 
+	if (regex_used)
+		regfree(&regex);
+
         pclose(pipe);
+
 	return retbuf;
 }
  
@@ -1755,10 +1772,10 @@ vfs_init(void)
 	MEMBER_OFFSET_INIT(file_f_dentry, "file", "f_dentry");
 	MEMBER_OFFSET_INIT(file_f_vfsmnt, "file", "f_vfsmnt");
 	MEMBER_OFFSET_INIT(file_f_count, "file", "f_count");
+	MEMBER_OFFSET_INIT(path_mnt, "path", "mnt");
+	MEMBER_OFFSET_INIT(path_dentry, "path", "dentry");
 	if (INVALID_MEMBER(file_f_dentry)) {
 		MEMBER_OFFSET_INIT(file_f_path, "file", "f_path");
-		MEMBER_OFFSET_INIT(path_mnt, "path", "mnt");
-		MEMBER_OFFSET_INIT(path_dentry, "path", "dentry");
 		ASSIGN_OFFSET(file_f_dentry) = OFFSET(file_f_path) + OFFSET(path_dentry);
 		ASSIGN_OFFSET(file_f_vfsmnt) = OFFSET(file_f_path) + OFFSET(path_mnt);
 	}
@@ -1856,35 +1873,35 @@ dump_filesys_table(int verbose)
 		goto show_hit_rates;
 
         for (i = 0; i < FILE_CACHE; i++)
-                fprintf(stderr, "   cached_file[%2d]: %lx (%ld)\n",
+                fprintf(fp, "   cached_file[%2d]: %lx (%ld)\n",
                         i, ft->cached_file[i],
                         ft->cached_file_hits[i]);
-        fprintf(stderr, "        file_cache: %lx\n", (ulong)ft->file_cache);
-        fprintf(stderr, "  file_cache_index: %d\n", ft->file_cache_index);
-        fprintf(stderr, "  file_cache_fills: %ld\n", ft->file_cache_fills);
+        fprintf(fp, "        file_cache: %lx\n", (ulong)ft->file_cache);
+        fprintf(fp, "  file_cache_index: %d\n", ft->file_cache_index);
+        fprintf(fp, "  file_cache_fills: %ld\n", ft->file_cache_fills);
 
 	for (i = 0; i < DENTRY_CACHE; i++)
-		fprintf(stderr, "  cached_dentry[%2d]: %lx (%ld)\n", 
+		fprintf(fp, "  cached_dentry[%2d]: %lx (%ld)\n", 
 			i, ft->cached_dentry[i],
 			ft->cached_dentry_hits[i]);
-	fprintf(stderr, "      dentry_cache: %lx\n", (ulong)ft->dentry_cache);
-	fprintf(stderr, "dentry_cache_index: %d\n", ft->dentry_cache_index);
-	fprintf(stderr, "dentry_cache_fills: %ld\n", ft->dentry_cache_fills);
+	fprintf(fp, "      dentry_cache: %lx\n", (ulong)ft->dentry_cache);
+	fprintf(fp, "dentry_cache_index: %d\n", ft->dentry_cache_index);
+	fprintf(fp, "dentry_cache_fills: %ld\n", ft->dentry_cache_fills);
 
         for (i = 0; i < INODE_CACHE; i++)
-                fprintf(stderr, "  cached_inode[%2d]: %lx (%ld)\n",
+                fprintf(fp, "  cached_inode[%2d]: %lx (%ld)\n",
                         i, ft->cached_inode[i],
                         ft->cached_inode_hits[i]);
-        fprintf(stderr, "       inode_cache: %lx\n", (ulong)ft->inode_cache);
-        fprintf(stderr, " inode_cache_index: %d\n", ft->inode_cache_index);
-        fprintf(stderr, " inode_cache_fills: %ld\n", ft->inode_cache_fills);
+        fprintf(fp, "       inode_cache: %lx\n", (ulong)ft->inode_cache);
+        fprintf(fp, " inode_cache_index: %d\n", ft->inode_cache_index);
+        fprintf(fp, " inode_cache_fills: %ld\n", ft->inode_cache_fills);
 
 show_hit_rates:
         if (ft->file_cache_fills) {
                 for (i = fhits = 0; i < FILE_CACHE; i++)
                         fhits += ft->cached_file_hits[i];
 
-                fprintf(stderr, "     file hit rate: %2ld%% (%ld of %ld)\n",
+                fprintf(fp, "     file hit rate: %2ld%% (%ld of %ld)\n",
                         (fhits * 100)/ft->file_cache_fills,
                         fhits, ft->file_cache_fills);
 	} 
@@ -1893,7 +1910,7 @@ show_hit_rates:
                 for (i = dhits = 0; i < DENTRY_CACHE; i++)
                         dhits += ft->cached_dentry_hits[i];
 
-		fprintf(stderr, "   dentry hit rate: %2ld%% (%ld of %ld)\n",
+		fprintf(fp, "   dentry hit rate: %2ld%% (%ld of %ld)\n",
 			(dhits * 100)/ft->dentry_cache_fills,
 			dhits, ft->dentry_cache_fills);
 	}
@@ -1902,7 +1919,7 @@ show_hit_rates:
                 for (i = ihits = 0; i < INODE_CACHE; i++)
                         ihits += ft->cached_inode_hits[i];
 
-		fprintf(stderr, "    inode hit rate: %2ld%% (%ld of %ld)\n",
+		fprintf(fp, "    inode hit rate: %2ld%% (%ld of %ld)\n",
                         (ihits * 100)/ft->inode_cache_fills,
                         ihits, ft->inode_cache_fills);
 	}
@@ -2071,7 +2088,7 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 	ulong fd;
 	ulong file;
 	ulong value;
-	int i, j;
+	int i, j, use_path;
 	int header_printed = 0;
 	char root_pathname[BUFSIZE];
 	char pwd_pathname[BUFSIZE];
@@ -2112,12 +2129,23 @@ open_files_dump(ulong task, int flags, struct reference *ref)
                 readmem(fs_struct_addr, KVADDR, fs_struct_buf, SIZE(fs_struct), 
 			"fs_struct buffer", FAULT_ON_ERROR);
 
-		root_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_root));
+		use_path = (MEMBER_TYPE("fs_struct", "root") == TYPE_CODE_STRUCT);
+		if (use_path)
+			root_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_root) +
+				OFFSET(path_dentry));
+		else
+			root_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_root));
 
 		if (root_dentry) {
 			if (VALID_MEMBER(fs_struct_rootmnt)) {
                 		vfsmnt = ULONG(fs_struct_buf +
                         		OFFSET(fs_struct_rootmnt));
+				get_pathname(root_dentry, root_pathname, 
+					BUFSIZE, 1, vfsmnt);
+			} else if (use_path) {
+				vfsmnt = ULONG(fs_struct_buf +
+					OFFSET(fs_struct_root) +
+					OFFSET(path_mnt));
 				get_pathname(root_dentry, root_pathname, 
 					BUFSIZE, 1, vfsmnt);
 			} else {
@@ -2126,7 +2154,11 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 			}
 		}
 
-		pwd_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_pwd));
+		if (use_path)
+			pwd_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_pwd) +
+				OFFSET(path_dentry));
+		else
+			pwd_dentry = ULONG(fs_struct_buf + OFFSET(fs_struct_pwd));
 
 		if (pwd_dentry) {
 			if (VALID_MEMBER(fs_struct_pwdmnt)) {
@@ -2134,6 +2166,13 @@ open_files_dump(ulong task, int flags, struct reference *ref)
                         		OFFSET(fs_struct_pwdmnt));
 				get_pathname(pwd_dentry, pwd_pathname, 
 					BUFSIZE, 1, vfsmnt);
+			} else if (use_path) {
+				vfsmnt = ULONG(fs_struct_buf +
+					OFFSET(fs_struct_pwd) +
+					OFFSET(path_mnt));
+				get_pathname(pwd_dentry, pwd_pathname, 
+					BUFSIZE, 1, vfsmnt);
+
 			} else {
 				get_pathname(pwd_dentry, pwd_pathname, 
 					BUFSIZE, 1, 0);
@@ -2279,7 +2318,7 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 				if (ref && file) {
 					open_tmpfile();
                                         if (file_dump(file, 0, 0, i,
-                                            DUMP_FULL_NAME)) {
+                                            DUMP_FULL_NAME|DUMP_EMPTY_FILE)) {
 						BZERO(buf4, BUFSIZE);
 						rewind(pc->tmpfile);
 						fgets(buf4, BUFSIZE, 
@@ -2297,8 +2336,8 @@ open_files_dump(ulong task, int flags, struct reference *ref)
 						fprintf(fp, files_header);
 						header_printed = 1;
 					}
-					file_dump(file, 0, 0, i,
-						  DUMP_FULL_NAME);
+					file_dump(file, 0, 0, i, 
+						DUMP_FULL_NAME|DUMP_EMPTY_FILE);
 				}
 			}
 			i++;
@@ -2342,6 +2381,8 @@ open_file_reference(struct reference *ref)
 		}
 
         	for (i = 1; i < 4; i++) {
+			if (STREQ(arglist[i], "?"))
+				continue;
         		vaddr = htol(arglist[i], FAULT_ON_ERROR, NULL);
         		if (vaddr == ref->hexval) 
         			return TRUE;
@@ -2495,16 +2536,60 @@ file_dump(ulong file, ulong dentry, ulong inode, int fd, int flags)
 		dentry = ULONG(file_buf + OFFSET(file_f_dentry));
 	}
 
-	if (!dentry) 
+	if (!dentry) {
+		if (flags & DUMP_EMPTY_FILE) {
+			fprintf(fp, "%3d%s%s%s%s%s%s%s%s%s%s\n",
+				fd,
+				space(MINSPACE),
+				mkstring(buf1, VADDR_PRLEN, 
+				CENTER|RJUST|LONG_HEX, 
+				MKSTR(file)),
+				space(MINSPACE),
+				mkstring(buf2, VADDR_PRLEN, 
+				CENTER|LONG_HEX|ZERO_FILL, 
+				MKSTR(dentry)),
+				space(MINSPACE),
+				mkstring(buf3, VADDR_PRLEN, 
+				CENTER, 
+				"?"),
+				space(MINSPACE),
+				"?   ",
+				space(MINSPACE),
+				"?");
+			return TRUE;
+		}
 		return FALSE;
+	}
 
 	if (!inode) {
 		dentry_buf = fill_dentry_cache(dentry);
 		inode = ULONG(dentry_buf + OFFSET(dentry_d_inode));
 	}
 
-	if (!inode) 
+	if (!inode) { 
+		if (flags & DUMP_EMPTY_FILE) {
+			fprintf(fp, "%3d%s%s%s%s%s%s%s%s%s%s\n",
+				fd,
+				space(MINSPACE),
+				mkstring(buf1, VADDR_PRLEN, 
+				CENTER|RJUST|LONG_HEX, 
+				MKSTR(file)),
+				space(MINSPACE),
+				mkstring(buf2, VADDR_PRLEN, 
+				CENTER|RJUST|LONG_HEX, 
+				MKSTR(dentry)),
+				space(MINSPACE),
+				mkstring(buf3, VADDR_PRLEN, 
+				CENTER|LONG_HEX|ZERO_FILL, 
+				MKSTR(inode)),
+				space(MINSPACE),
+				"?   ",
+				space(MINSPACE),
+				"?");
+			return TRUE;
+		}
 		return FALSE;
+	}
 
 	inode_buf = fill_inode_cache(inode);
 
@@ -3177,7 +3262,7 @@ get_live_memory_source(void)
 	char modname1[BUFSIZE];
 	char modname2[BUFSIZE];
 	char *name;
-	int use_module;
+	int use_module, crashbuiltin;
 	struct stat stat1, stat2;
 
 	pc->flags |= DEVMEM;
@@ -3185,7 +3270,7 @@ get_live_memory_source(void)
 		goto live_report;
 
 	pc->live_memsrc = "/dev/mem";
-	use_module = FALSE;
+	use_module = crashbuiltin = FALSE;
 
 	if (file_exists("/dev/mem", &stat1) &&
 	    file_exists(pc->memory_device, &stat2) &&
@@ -3222,6 +3307,10 @@ get_live_memory_source(void)
 		}
 
 		pclose(pipe);
+
+		if (!use_module && file_exists("/dev/crash", &stat1) && 
+		    S_ISCHR(stat1.st_mode))
+			crashbuiltin = TRUE;
 	}
 
 	if (use_module) {
@@ -3230,6 +3319,15 @@ get_live_memory_source(void)
 		pc->readmem = read_memory_device;
 		pc->writemem = write_memory_device;
 		pc->live_memsrc = pc->memory_device;
+	}
+
+	if (crashbuiltin) {
+		pc->flags &= ~DEVMEM;
+		pc->flags |= CRASHBUILTIN;
+		pc->readmem = read_memory_device;
+		pc->writemem = write_memory_device;
+		pc->live_memsrc = pc->memory_device;
+		pc->memory_module = NULL;
 	}
 
 live_report:
@@ -3413,10 +3511,11 @@ create_memory_device(dev_t dev)
 /*
  *  If we're here, the memory driver module is being requested:
  *
- *   1. If the module is not already loaded, insmod it.
- *   2. Determine the misc driver minor device number that it was assigned.
- *   3. Create (or verify) the device file.
- *   4. Then just open it.
+ *   1. If /dev/crash is built into the kernel, just open it.
+ *   2. If the module is not already loaded, insmod it.
+ *   3. Determine the misc driver minor device number that it was assigned.
+ *   4. Create (or verify) the device file.
+ *   5. Then just open it.
  */ 
 
 static int 
@@ -3424,10 +3523,14 @@ memory_driver_init(void)
 {
 	dev_t dev;
 
+	if (pc->flags & CRASHBUILTIN)
+		goto open_device;
+
 	if (!memory_driver_module_loaded(NULL)) {
 	    	if (!insmod_memory_driver_module()) 
 			return FALSE;
-	}
+	} else
+		pc->flags |= MODPRELOAD;
 
 	if (!get_memory_driver_dev(&dev)) 
 		return FALSE;
@@ -3435,6 +3538,7 @@ memory_driver_init(void)
 	if (!create_memory_device(dev)) 
 		return FALSE;
 
+open_device:
 	if ((pc->mfd = open(pc->memory_device, O_RDONLY)) < 0) { 
 		error(INFO, "%s: open: %s\n", pc->memory_device, 
 			strerror(errno));

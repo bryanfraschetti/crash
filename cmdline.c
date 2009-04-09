@@ -1,8 +1,8 @@
 /* cmdline.c - core analysis suite
  *
  * Copyright (C) 1999, 2000, 2001, 2002 Mission Critical Linux, Inc.
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 David Anderson
- * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007 Red Hat, Inc. All rights reserved.
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 David Anderson
+ * Copyright (C) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009 Red Hat, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1285,8 +1285,10 @@ exec_input_file(void)
 				    "cannot malloc input file command line buffer\n");
 				return;
 			}
+			BZERO(pc->runtime_ifile_cmd, BUFSIZE);
 		}
-		strcpy(pc->runtime_ifile_cmd, pc->orig_line);
+		if (!strlen(pc->runtime_ifile_cmd))
+			strcpy(pc->runtime_ifile_cmd, pc->orig_line);
 		pc->ifile_in_progress = RUNTIME_IFILE;
 	}
 
