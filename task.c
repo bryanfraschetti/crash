@@ -278,8 +278,10 @@ task_init(void)
 	} else if (VALID_MEMBER(task_struct_stack))
 		MEMBER_OFFSET_INIT(task_struct_thread_info, "task_struct", "stack");
 
+	MEMBER_OFFSET_INIT(task_struct_cpu, "task_struct", "cpu");
+
 	if (VALID_MEMBER(task_struct_thread_info)) {
-		if (tt->flags & THREAD_INFO_IN_TASK) {
+		if (tt->flags & THREAD_INFO_IN_TASK && VALID_MEMBER(task_struct_cpu)) {
 			MEMBER_OFFSET_INIT(thread_info_flags, "thread_info", "flags");
 			/* (unnecessary) reminders */
 			ASSIGN_OFFSET(thread_info_task) = INVALID_OFFSET;
@@ -297,6 +299,11 @@ task_init(void)
 	}
 
         MEMBER_OFFSET_INIT(task_struct_state, "task_struct", "state");
+	MEMBER_SIZE_INIT(task_struct_state, "task_struct", "state");
+	if (INVALID_MEMBER(task_struct_state)) {
+		MEMBER_OFFSET_INIT(task_struct_state, "task_struct", "__state");
+		MEMBER_SIZE_INIT(task_struct_state, "task_struct", "__state");
+	}
         MEMBER_OFFSET_INIT(task_struct_exit_state, "task_struct", "exit_state");
         MEMBER_OFFSET_INIT(task_struct_pid, "task_struct", "pid");
         MEMBER_OFFSET_INIT(task_struct_comm, "task_struct", "comm");
@@ -310,7 +317,6 @@ task_init(void)
         MEMBER_OFFSET_INIT(task_struct_has_cpu, "task_struct", "has_cpu");
         MEMBER_OFFSET_INIT(task_struct_cpus_runnable,  
 		"task_struct", "cpus_runnable");
-	MEMBER_OFFSET_INIT(task_struct_cpu, "task_struct", "cpu");
 	MEMBER_OFFSET_INIT(task_struct_active_mm, "task_struct", "active_mm");
 	MEMBER_OFFSET_INIT(task_struct_next_run, "task_struct", "next_run");
 	MEMBER_OFFSET_INIT(task_struct_flags, "task_struct", "flags");
@@ -2895,7 +2901,7 @@ add_context(ulong task, char *tp)
 		else
 			tc->thread_info = ULONG(tp + OFFSET(task_struct_thread_info));
 		fill_thread_info(tc->thread_info);
-		if (tt->flags & THREAD_INFO_IN_TASK)
+		if (tt->flags & THREAD_INFO_IN_TASK && VALID_MEMBER(task_struct_cpu))
                 	processor_addr = (int *) (tp + OFFSET(task_struct_cpu));
 		else
 			processor_addr = (int *) (tt->thread_info + 
@@ -5926,7 +5932,10 @@ task_state(ulong task)
 	if (!tt->last_task_read)
 		return 0;
 
-	state = ULONG(tt->task_struct + OFFSET(task_struct_state));
+	if (SIZE(task_struct_state) == sizeof(ulong))
+		state = ULONG(tt->task_struct + OFFSET(task_struct_state));
+	else
+		state = UINT(tt->task_struct + OFFSET(task_struct_state));
 	exit_state = VALID_MEMBER(task_struct_exit_state) ?
 		ULONG(tt->task_struct + OFFSET(task_struct_exit_state)) : 0;
 

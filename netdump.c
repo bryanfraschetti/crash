@@ -819,10 +819,9 @@ read_netdump(int fd, void *bufptr, int cnt, ulong addr, physaddr_t paddr)
 		read_ret = read(nd->ndfd, bufptr, cnt);
 		if (read_ret != cnt) {
 			/*
-	 		 *  If the incomplete flag has been set in the header, 
-			 *  first check whether zero_excluded has been set.
+			 *  First check whether zero_excluded has been set.
 			 */
-			if (is_incomplete_dump() && (read_ret >= 0) &&
+			if ((read_ret >= 0) &&
 			    (*diskdump_flags & ZERO_EXCLUDED)) {
 				if (CRASHDEBUG(8))
 					fprintf(fp, "read_netdump: zero-fill: "
@@ -1921,7 +1920,8 @@ vmcoreinfo_read_string(const char *key)
 			sprintf(value, "%ld", nd->arch_data2 & 0xffffffff);
 			return value;
 		}
-		if (STREQ(key, "NUMBER(TCR_EL1_T1SZ)") && nd->arch_data2) {
+		if ((STREQ(key, "NUMBER(TCR_EL1_T1SZ)") ||
+		     STREQ(key, "NUMBER(tcr_el1_t1sz)")) && nd->arch_data2) {
 			value = calloc(VADDR_PRLEN+1, sizeof(char));
 			sprintf(value, "%lld", ((ulonglong)nd->arch_data2 >> 32) & 0xffffffff);
 			pc->read_vmcoreinfo = no_vmcoreinfo;
@@ -5206,11 +5206,17 @@ kdump_kaslr_check(void)
 		return FALSE;
 }
 
-#ifdef X86_64
 int
 kdump_get_nr_cpus(void)
 {
-	return nd->num_qemu_notes;
+        if (nd->num_prstatus_notes)
+                return nd->num_prstatus_notes;
+        else if (nd->num_qemu_notes)
+                return nd->num_qemu_notes;
+        else if (nd->num_vmcoredd_notes)
+                return nd->num_vmcoredd_notes;
+
+        return 1;
 }
 
 QEMUCPUState *
@@ -5232,7 +5238,6 @@ kdump_get_qemucpustate(int cpu)
 
 	return (QEMUCPUState *)nd->nt_qemu_percpu[cpu];
 }
-#endif
 
 static void *
 get_kdump_device_dump_offset(void)

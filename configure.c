@@ -161,13 +161,13 @@ void add_extra_lib(char *);
 
 #define GDB_TARGET_DEFAULT        "GDB_CONF_FLAGS="
 #define GDB_TARGET_ARM_ON_X86     "GDB_CONF_FLAGS=--target=arm-elf-linux"
-#define GDB_TARGET_ARM_ON_X86_64  "GDB_CONF_FLAGS=--target=arm-elf-linux CFLAGS=-m32"
-#define GDB_TARGET_X86_ON_X86_64  "GDB_CONF_FLAGS=--target=i686-pc-linux-gnu CFLAGS=-m32"
-#define GDB_TARGET_PPC_ON_PPC64   "GDB_CONF_FLAGS=--target=ppc-elf-linux CFLAGS=-m32"
+#define GDB_TARGET_ARM_ON_X86_64  "GDB_CONF_FLAGS=--target=arm-elf-linux CFLAGS=-m32 CXXFLAGS=-m32"
+#define GDB_TARGET_X86_ON_X86_64  "GDB_CONF_FLAGS=--target=i686-pc-linux-gnu CFLAGS=-m32 CXXFLAGS=-m32"
+#define GDB_TARGET_PPC_ON_PPC64   "GDB_CONF_FLAGS=--target=ppc-elf-linux CFLAGS=-m32 CXXFLAGS=-m32"
 #define GDB_TARGET_ARM64_ON_X86_64  "GDB_CONF_FLAGS=--target=aarch64-elf-linux"   /* TBD */
 #define GDB_TARGET_PPC64_ON_X86_64  "GDB_CONF_FLAGS=--target=powerpc64le-unknown-linux-gnu"
 #define GDB_TARGET_MIPS_ON_X86     "GDB_CONF_FLAGS=--target=mipsel-elf-linux"
-#define GDB_TARGET_MIPS_ON_X86_64  "GDB_CONF_FLAGS=--target=mipsel-elf-linux CFLAGS=-m32"
+#define GDB_TARGET_MIPS_ON_X86_64  "GDB_CONF_FLAGS=--target=mipsel-elf-linux CFLAGS=-m32 CXXFLAGS=-m32"
      
 /*
  *  The original plan was to allow the use of a particular version
@@ -182,9 +182,10 @@ void add_extra_lib(char *);
 #define GDB_7_0   (3)
 #define GDB_7_3_1 (4)
 #define GDB_7_6   (5)
-#define SUPPORTED_GDB_VERSIONS (GDB_7_6 + 1)
+#define GDB_10_2   (6)
+#define SUPPORTED_GDB_VERSIONS (GDB_10_2 + 1)
 
-int default_gdb = GDB_7_6;
+int default_gdb = GDB_10_2;
 
 struct supported_gdb_version {
 	char *GDB;
@@ -249,6 +250,15 @@ struct supported_gdb_version {
 	    "GDB_FLAGS=-DGDB_7_6",
 	    "GPLv3"
 	},
+        {
+            "GDB=gdb-10.2",
+            "10.2",
+            "GDB_FILES=${GDB_10.2_FILES}",
+            "GDB_OFILES=${GDB_10.2_OFILES}",
+            "GDB_PATCH_FILES=gdb-10.2.patch",
+            "GDB_FLAGS=-DGDB_10_2",
+            "GPLv3"
+        },
 };
 
 #define DAEMON  0x1
@@ -1514,6 +1524,12 @@ setup_gdb_defaults(void)
 			fprintf(stderr, ".gdb configuration: %s\n", sp->GDB_VERSION_IN);
 			return store_gdb_defaults(sp);
 		}
+                if (strcmp(buf, "10.2") == 0) {
+                        fclose(fp);
+                        sp = &supported_gdb_versions[GDB_10_2];
+                        fprintf(stderr, ".gdb configuration: %s\n", sp->GDB_VERSION_IN);
+                        return store_gdb_defaults(sp);
+                }
 
         }
 	
@@ -1738,6 +1754,10 @@ get_extra_flags(char *filename, char *initial)
  *    - enter -DSNAPPY in the CFLAGS.extra file
  *    - enter -lsnappy in the LDFLAGS.extra file
  *
+ *  For zstd:
+ *    - enter -DZSTD in the CFLAGS.extra file
+ *    - enter -lzstd in the LDFLAGS.extra file
+ *
  *  For valgrind:
  *    - enter -DVALGRIND in the CFLAGS.extra file
  */
@@ -1746,6 +1766,7 @@ add_extra_lib(char *option)
 {
 	int lzo, add_DLZO, add_llzo2; 
 	int snappy, add_DSNAPPY, add_lsnappy;
+	int zstd, add_DZSTD, add_lzstd;
 	int valgrind, add_DVALGRIND;
 	char *cflags, *ldflags;
 	FILE *fp_cflags, *fp_ldflags;
@@ -1754,6 +1775,7 @@ add_extra_lib(char *option)
 
 	lzo = add_DLZO = add_llzo2 = 0;
 	snappy = add_DSNAPPY = add_lsnappy = 0;
+	zstd = add_DZSTD = add_lzstd = 0;
 	valgrind = add_DVALGRIND = 0;
 
 	ldflags = get_extra_flags("LDFLAGS.extra", NULL);
@@ -1775,13 +1797,21 @@ add_extra_lib(char *option)
 			add_lsnappy++;
 	}
 
+	if (strcmp(option, "zstd") == 0) {
+		zstd++;
+		if (!cflags || !strstr(cflags, "-DZSTD"))
+			add_DZSTD++;
+		if (!ldflags || !strstr(ldflags, "-lzstd"))
+			add_lzstd++;
+	}
+
 	if (strcmp(option, "valgrind") == 0) {
 		valgrind++;
 		if (!cflags || !strstr(cflags, "-DVALGRIND"))
 			add_DVALGRIND++;
 	}
 
-	if ((lzo || snappy) &&
+	if ((lzo || snappy || zstd) &&
 	    file_exists("diskdump.o") && (unlink("diskdump.o") < 0)) {
 		perror("diskdump.o");
 		return;
@@ -1806,24 +1836,28 @@ add_extra_lib(char *option)
 		return;
 	}
 
-	if (add_DLZO || add_DSNAPPY || add_DVALGRIND) {
+	if (add_DLZO || add_DSNAPPY || add_DZSTD || add_DVALGRIND) {
 		while (fgets(inbuf, 512, fp_cflags))
 			;
 		if (add_DLZO)
 			fputs("-DLZO\n", fp_cflags);
 		if (add_DSNAPPY)
 			fputs("-DSNAPPY\n", fp_cflags);
+		if (add_DZSTD)
+			fputs("-DZSTD\n", fp_cflags);
 		if (add_DVALGRIND)
 			fputs("-DVALGRIND\n", fp_cflags);
 	}
 
-	if (add_llzo2 || add_lsnappy) {
+	if (add_llzo2 || add_lsnappy || add_lzstd) {
 		while (fgets(inbuf, 512, fp_ldflags))
 			;
 		if (add_llzo2)
 			fputs("-llzo2\n", fp_ldflags);
 		if (add_lsnappy)
 			fputs("-lsnappy\n", fp_ldflags);
+		if (add_lzstd)
+			fputs("-lzstd\n", fp_ldflags);
 	}
 
 	fclose(fp_cflags);

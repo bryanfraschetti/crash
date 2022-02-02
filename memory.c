@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <ctype.h>
 #include <netinet/in.h>
+#include <byteswap.h>
 
 struct meminfo {           /* general purpose memory information structure */
         ulong cache;       /* used by the various memory searching/dumping */
@@ -47,6 +48,7 @@ struct meminfo {           /* general purpose memory information structure */
 	int slab_offset;
         char *reqname;
 	char *curname;
+	ulong *spec_cpumask;
 	ulong *addrlist;
 	int *kmem_bufctl;
 	ulong *cpudata[NR_CPUS];
@@ -2211,6 +2213,7 @@ accessible(ulong kva)
 #define READ_ERRMSG      "read error: %s address: %llx  type: \"%s\"\n"
 #define WRITE_ERRMSG     "write error: %s address: %llx  type: \"%s\"\n"
 #define PAGE_EXCLUDED_ERRMSG  "page excluded: %s address: %llx  type: \"%s\"\n"
+#define PAGE_INCOMPLETE_ERRMSG  "page incomplete: %s address: %llx  type: \"%s\"\n"
 
 #define RETURN_ON_PARTIAL_READ() \
 	if ((error_handle & RETURN_PARTIAL) && (size < orig_size)) {		\
@@ -2375,6 +2378,12 @@ readmem(ulonglong addr, int memtype, void *buffer, long size,
                         if (PRINT_ERROR_MESSAGE)
                         	error(INFO, PAGE_EXCLUDED_ERRMSG, memtype_string(memtype, 0), addr, type);
                         goto readmem_error;
+
+		case PAGE_INCOMPLETE:
+			RETURN_ON_PARTIAL_READ();
+			if (PRINT_ERROR_MESSAGE)
+				error(INFO, PAGE_INCOMPLETE_ERRMSG, memtype_string(memtype, 0), addr, type);
+			goto readmem_error;
 
 		default:
 			break;
@@ -4850,10 +4859,13 @@ cmd_kmem(void)
 	struct meminfo meminfo;
 	ulonglong value[MAXARGS];
 	char buf[BUFSIZE];
+	char arg_buf[BUFSIZE];
 	char *p1;
-	int spec_addr, escape;
+	ulong *cpus;
+	int spec_addr, escape, choose_cpu;
 
-	spec_addr = 0;
+	cpus = NULL;
+	spec_addr = choose_cpu = 0;
         sflag =	Sflag = pflag = fflag = Fflag = Pflag = zflag = oflag = 0;
 	vflag = Cflag = cflag = iflag = nflag = lflag = Lflag = Vflag = 0;
 	gflag = hflag = rflag = 0;
@@ -4862,7 +4874,7 @@ cmd_kmem(void)
 	BZERO(&value[0], sizeof(ulonglong)*MAXARGS);
 	pc->curcmd_flags &= ~HEADER_PRINTED;
 
-        while ((c = getopt(argcnt, args, "gI:sSrFfm:pvczCinl:L:PVoh")) != EOF) {
+        while ((c = getopt(argcnt, args, "gI:sS::rFfm:pvczCinl:L:PVoh")) != EOF) {
                 switch(c)
 		{
 		case 'V':
@@ -4902,6 +4914,29 @@ cmd_kmem(void)
 			break;
 
 		case 'S':
+			if (choose_cpu)
+				error(FATAL, "only one -S option allowed\n");
+			/* Use the GNU extension with getopt(3) ... */
+			if (optarg) {
+				if (!(vt->flags & KMALLOC_SLUB))
+					error(FATAL,
+						"can only use -S=cpu(s) with a kernel \n"
+						"that is built with CONFIG_SLUB support.\n");
+				if (optarg[0] != '=')
+					error(FATAL,
+						"CPU-specific slab data to be displayed "
+						"must be written as expected only e.g. -S=1,45.\n");
+				/* Skip = ... */
+				optarg++;
+
+				choose_cpu = 1;
+				BZERO(arg_buf, BUFSIZE);
+				strcpy(arg_buf, optarg);
+
+				cpus = get_cpumask_buf();
+				make_cpumask(arg_buf, cpus, FAULT_ON_ERROR, NULL);
+				meminfo.spec_cpumask = cpus;
+			}
 			Sflag = 1; sflag = rflag = 0;
 			break;
 
@@ -5184,6 +5219,8 @@ cmd_kmem(void)
 			meminfo.flags = VERBOSE;
 			vt->dump_kmem_cache(&meminfo);
 		}
+		if (choose_cpu)
+			FREEBUF(cpus);
 	}
 
 	if (vflag == 1)
@@ -17269,12 +17306,13 @@ nr_to_section(ulong nr)
  *      which results in PFN_SECTION_SHIFT equal 6.
  * To sum it up, at least 6 bits are available.
  */
-#define SECTION_MARKED_PRESENT	(1UL<<0)
-#define SECTION_HAS_MEM_MAP	(1UL<<1)
-#define SECTION_IS_ONLINE	(1UL<<2)
-#define SECTION_IS_EARLY	(1UL<<3)
-#define SECTION_MAP_LAST_BIT	(1UL<<4)
-#define SECTION_MAP_MASK	(~(SECTION_MAP_LAST_BIT-1))
+#define SECTION_MARKED_PRESENT		(1UL<<0)
+#define SECTION_HAS_MEM_MAP		(1UL<<1)
+#define SECTION_IS_ONLINE		(1UL<<2)
+#define SECTION_IS_EARLY		(1UL<<3)
+#define SECTION_TAINT_ZONE_DEVICE	(1UL<<4)
+#define SECTION_MAP_LAST_BIT		(1UL<<5)
+#define SECTION_MAP_MASK		(~(SECTION_MAP_LAST_BIT-1))
 
 
 int 
@@ -17372,6 +17410,8 @@ fill_mem_section_state(ulong state, char *buf)
 		bufidx += sprintf(buf + bufidx, "%s", "O");
 	if (state & SECTION_IS_EARLY)
 		bufidx += sprintf(buf + bufidx, "%s", "E");
+	if (state & SECTION_TAINT_ZONE_DEVICE)
+		bufidx += sprintf(buf + bufidx, "%s", "D");
 }
 
 void 
@@ -17564,13 +17604,13 @@ print_memory_block(ulong memory_block)
 
 	if (MEMBER_EXISTS("memory_block", "nid")) {
 		readmem(memory_block + OFFSET(memory_block_nid), KVADDR, &nid,
-			sizeof(void *), "memory_block nid", FAULT_ON_ERROR);
+			sizeof(int), "memory_block nid", FAULT_ON_ERROR);
 		fprintf(fp, " %s %s %s %s  %s %s\n",
 			mkstring(buf1, VADDR_PRLEN, LJUST|LONG_HEX,
 			MKSTR(memory_block)),
 			mkstring(buf2, 12, CENTER, name),
 			parangebuf,
-			mkstring(buf5, strlen("NODE"), CENTER|LONG_DEC,
+			mkstring(buf5, strlen("NODE"), CENTER|INT_DEC,
 			MKSTR(nid)),
 			mkstring(buf6, strlen("OFFLINE"), LJUST,
 			statebuf),
@@ -19079,6 +19119,8 @@ do_kmem_cache_slub(struct meminfo *si)
 	per_cpu = (ulong *)GETBUF(sizeof(ulong) * vt->numnodes);
 
         for (i = 0; i < kt->cpus; i++) {
+		if (si->spec_cpumask && !NUM_IN_BITMAP(si->spec_cpumask, i))
+			continue;
 		if (hide_offline_cpu(i)) {
 			fprintf(fp, "CPU %d [OFFLINE]\n", i);
 			continue;
@@ -19336,10 +19378,14 @@ count_free_objects(struct meminfo *si, ulong freelist)
 static ulong
 freelist_ptr(struct meminfo *si, ulong ptr, ulong ptr_addr)
 {
-	if (VALID_MEMBER(kmem_cache_random))
+	if (VALID_MEMBER(kmem_cache_random)) {
 		/* CONFIG_SLAB_FREELIST_HARDENED */
+
+		if (THIS_KERNEL_VERSION >= LINUX(5,7,0))
+			ptr_addr = (sizeof(long) == 8) ? bswap_64(ptr_addr)
+						       : bswap_32(ptr_addr);
 		return (ptr ^ si->random ^ ptr_addr);
-	else
+	} else
 		return ptr;
 }
 

@@ -95,6 +95,7 @@ static ulong __dump_audit(char *);
 static void dump_audit(void);
 static char *vmcoreinfo_read_string(const char *);
 static void check_vmcoreinfo(void);
+static int is_pvops_xen(void);
 
 
 /*
@@ -109,7 +110,6 @@ kernel_init()
 	char *rqstruct;
 	char *rq_timestamp_name = NULL;
 	char *irq_desc_type_name;	
-	ulong pv_init_ops;
 	struct gnu_request req;
 
 	if (pc->flags & KERNEL_DEBUG_QUERY)
@@ -169,11 +169,7 @@ kernel_init()
                        	error(FATAL, "cannot malloc m2p page.");
 	}
 
-	if (PVOPS() && symbol_exists("pv_init_ops") &&
-	    readmem(symbol_value("pv_init_ops"), KVADDR, &pv_init_ops,
-	    sizeof(void *), "pv_init_ops", RETURN_ON_ERROR) &&
-	    ((p1 = value_symbol(pv_init_ops)) &&
-	    (STREQ(p1, "xen_patch") || STREQ(p1, "paravirt_patch_default")))) {
+	if (is_pvops_xen()) {
 		kt->flags |= ARCH_XEN | ARCH_PVOPS_XEN;
 		kt->xen_flags |= WRITABLE_PAGE_TABLES;
 		if (machine_type("X86"))
@@ -615,7 +611,15 @@ kernel_init()
 		kt->flags |= TVEC_BASES_V1;
 
         STRUCT_SIZE_INIT(__wait_queue, "__wait_queue");
-        if (VALID_STRUCT(__wait_queue)) {
+	STRUCT_SIZE_INIT(wait_queue_entry, "wait_queue_entry");
+	if (VALID_STRUCT(wait_queue_entry)) {
+		MEMBER_OFFSET_INIT(wait_queue_entry_private,
+			"wait_queue_entry", "private");
+		MEMBER_OFFSET_INIT(wait_queue_head_head,
+			"wait_queue_head", "head");
+		MEMBER_OFFSET_INIT(wait_queue_entry_entry,
+			"wait_queue_entry", "entry");
+	} else if (VALID_STRUCT(__wait_queue)) {
 		if (MEMBER_EXISTS("__wait_queue", "task"))
 			MEMBER_OFFSET_INIT(__wait_queue_task,
 				"__wait_queue", "task");
@@ -1049,6 +1053,7 @@ verify_version(void)
 	if (!(sp = symbol_search("linux_banner")))
 		error(FATAL, "linux_banner symbol does not exist?\n");
 	else if ((sp->type == 'R') || (sp->type == 'r') ||
+		(THIS_KERNEL_VERSION >= LINUX(2,6,11) && sp->type == 'D') ||
 		 (machine_type("ARM") && sp->type == 'T') ||
 		 (machine_type("ARM64")))
 		linux_banner = symbol_value("linux_banner");
@@ -1480,8 +1485,7 @@ list_source_code(struct gnu_request *req, int count_entered)
 		if (!(lm->mod_flags & MOD_LOAD_SYMS))
 			error(FATAL, "%s: module source code is not available\n", lm->mod_name);
 		get_line_number(req->addr, buf1, FALSE);
-	} else if (kt->flags2 & KASLR)
-		req->addr -= (kt->relocate * -1);
+	}
 
 	sprintf(buf1, "list *0x%lx", req->addr);
 	open_tmpfile();
@@ -4657,7 +4661,7 @@ reinit_modules(void)
         st->ext_module_symtable = NULL;
         st->load_modules = NULL;
         kt->mods_installed = 0;
-	clear_text_value_cache();
+	memset(st->mod_symname_hash, 0, sizeof(st->mod_symname_hash));
 
         module_init();
 }
@@ -4792,7 +4796,18 @@ module_objfile_search(char *modref, char *filename, char *tree)
 
 	sprintf(dir, "%s/%s", DEFAULT_REDHAT_DEBUG_LOCATION, 
 		kt->utsname.release);
-	retbuf = search_directory_tree(dir, file, 0);
+	if (!(retbuf = search_directory_tree(dir, file, 0))) {
+		switch (kt->flags & (KMOD_V1|KMOD_V2))
+		{
+		case KMOD_V2:
+			sprintf(file, "%s.ko", modref);
+			retbuf = search_directory_tree(dir, file, 0);
+			if (!retbuf) {
+				sprintf(file, "%s.ko.debug", modref);
+				retbuf = search_directory_tree(dir, file, 0);
+			}
+		}
+	}
 
 	if (!retbuf && (env = getenv("CRASH_MODULE_PATH"))) {
 		sprintf(dir, "%s", env);
@@ -5091,6 +5106,10 @@ dump_log(int msg_flags)
 	if ((len = get_symbol_length("log_end")) == sizeof(int)) {
 		get_symbol_data("log_end", len, &tmp);
 		log_end = (ulong)tmp;
+	} else if (len == 0) {
+		THIS_KERNEL_VERSION >= LINUX(2,6,25) ?
+			get_symbol_data("log_end", sizeof(unsigned), &log_end) :
+			get_symbol_data("log_end", sizeof(unsigned long), &log_end);
 	} else
 		get_symbol_data("log_end", len, &log_end);
 
@@ -5465,6 +5484,24 @@ cmd_sys(void)
 }
 
 static int
+is_kernel_tainted(void)
+{
+	ulong tainted_mask;
+	int tainted;
+
+	if (kernel_symbol_exists("tainted")) {
+		get_symbol_data("tainted", sizeof(int), &tainted);
+		if (tainted)
+			return TRUE;
+	} else if (kernel_symbol_exists("tainted_mask")) {
+		get_symbol_data("tainted_mask", sizeof(ulong), &tainted_mask);
+		if (tainted_mask)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static int
 is_livepatch(void)
 {
 	int i;
@@ -5527,16 +5564,18 @@ display_sys_stats(void)
 		}
 	} else {
         	if (pc->system_map) {
-                	fprintf(fp, "  SYSTEM MAP: %s%s\n", pc->system_map,
-				is_livepatch() ? "  [LIVEPATCH]" : "");
+			fprintf(fp, "  SYSTEM MAP: %s%s%s\n", pc->system_map,
+				is_livepatch() ? "  [LIVEPATCH]" : "",
+				is_kernel_tainted() ? "  [TAINTED]" : "");
 			fprintf(fp, "DEBUG KERNEL: %s %s\n", 
 					pc->namelist_orig ?
 					pc->namelist_orig : pc->namelist,
 					debug_kernel_version(pc->namelist));
 		} else
-			fprintf(fp, "      KERNEL: %s%s\n", pc->namelist_orig ? 
+			fprintf(fp, "      KERNEL: %s%s%s\n", pc->namelist_orig ?
 				pc->namelist_orig : pc->namelist,
-				is_livepatch() ? "  [LIVEPATCH]" : "");
+				is_livepatch() ? "  [LIVEPATCH]" : "",
+				is_kernel_tainted() ? "  [TAINTED]" : "");
 	}
 
 	if (pc->debuginfo_file) { 
@@ -9367,9 +9406,9 @@ dump_waitq(ulong wq, char *wq_name)
 	struct list_data list_data, *ld;
 	ulong *wq_list;			/* addr of wait queue element */
 	ulong next_offset;		/* next pointer of wq element */
-	ulong task_offset;		/* offset of task in wq element */
+	ulong task_offset = 0;		/* offset of task in wq element */
 	int cnt;			/* # elems on Queue */
-	int start_index;		/* where to start in wq array */
+	int start_index = -1;		/* where to start in wq array */
 	int i;
 
 	ld = &list_data;
@@ -9398,8 +9437,19 @@ dump_waitq(ulong wq, char *wq_name)
                 ld->member_offset = next_offset;
 
 		start_index = 1;
+	} else if (VALID_STRUCT(wait_queue_entry)) {
+		ulong head_offset;
+
+		next_offset = OFFSET(list_head_next);
+		task_offset = OFFSET(wait_queue_entry_private);
+		head_offset = OFFSET(wait_queue_head_head);
+		ld->end = ld->start = wq + head_offset + next_offset;
+		ld->list_head_offset = OFFSET(wait_queue_entry_entry);
+		ld->member_offset = next_offset;
+
+		start_index = 1;
 	} else {
-		return;
+		error(FATAL, "cannot determine wait queue structures\n");
 	}
 
 	hq_open();
@@ -10690,6 +10740,32 @@ paravirt_init(void)
 	}
 }
 
+static int
+is_pvops_xen(void)
+{
+	ulong addr;
+	char *sym;
+
+	if (!PVOPS())
+		return FALSE;
+
+	if (symbol_exists("pv_init_ops") &&
+	    readmem(symbol_value("pv_init_ops"), KVADDR, &addr,
+	    sizeof(void *), "pv_init_ops", RETURN_ON_ERROR) &&
+	    (sym = value_symbol(addr)) &&
+	    (STREQ(sym, "xen_patch") ||
+	     STREQ(sym, "paravirt_patch_default")))
+		return TRUE;
+
+	if (symbol_exists("xen_start_info") &&
+	    readmem(symbol_value("xen_start_info"), KVADDR, &addr,
+	    sizeof(void *), "xen_start_info", RETURN_ON_ERROR) &&
+	    addr != 0)
+		return TRUE;
+
+	return FALSE;
+}
+
 /*
  *  Get the kernel's xtime timespec from its relevant location.
  */
@@ -11158,135 +11234,101 @@ dump_variable_length_record(void)
 }
 
 static void
-show_kernel_taints_v4_10(char *buf, int verbose)
-{
-	int i, bx;
-	char tnt_true, tnt_false;
-	int tnts_len;
-	ulong tnts_addr;
-	ulong tainted_mask, *tainted_mask_ptr;
-	struct syment *sp;
-
-	if (!(VALID_STRUCT(taint_flag) &&
-	     VALID_MEMBER(tnt_true) && VALID_MEMBER(tnt_false))) {
-		STRUCT_SIZE_INIT(taint_flag, "taint_flag");
-		MEMBER_OFFSET_INIT(tnt_true, "taint_flag", "true");
-		MEMBER_OFFSET_INIT(tnt_false, "taint_flag", "false");
-		if (INVALID_MEMBER(tnt_true)) {
-			MEMBER_OFFSET_INIT(tnt_true, "taint_flag", "c_true");
-			MEMBER_OFFSET_INIT(tnt_false, "taint_flag", "c_false");
-		}
-	}
-
-	bx = 0;
-	buf[0] = '\0';
-
-	/*
-	 *  Make sure that all dependencies are valid to prevent
-	 *  a fatal error from killing the session during the 
-	 *  pre-RUNTIME system banner display.
-	 */ 
-	if (!(pc->flags & RUNTIME)) {
-		if (INVALID_MEMBER(tnt_true) || INVALID_MEMBER(tnt_false) ||
-		    !kernel_symbol_exists("tainted_mask"))
-			return;
-	}
-
-	tnts_len = get_array_length("taint_flags", NULL, 0);
-	sp = symbol_search("taint_flags");
-	tnts_addr = sp->value;
-
-	get_symbol_data("tainted_mask", sizeof(ulong), &tainted_mask);
-	tainted_mask_ptr = &tainted_mask;
-
-	for (i = 0; i < tnts_len; i++) {
-		if (NUM_IN_BITMAP(tainted_mask_ptr, i)) {
-			readmem((tnts_addr + i * SIZE(taint_flag)) +
-					OFFSET(tnt_true),
-				KVADDR, &tnt_true, sizeof(char),
-				"tnt true", FAULT_ON_ERROR);
-				buf[bx++] = tnt_true;
-		} else {
-			readmem((tnts_addr + i * SIZE(taint_flag)) +
-					OFFSET(tnt_false),
-				KVADDR, &tnt_false, sizeof(char),
-				"tnt false", FAULT_ON_ERROR);
-			if (tnt_false != ' ' && tnt_false != '-' &&
-			    tnt_false != 'G')
-				buf[bx++] = tnt_false;
-		}
-	}
-
-	buf[bx++] = '\0';
-
-	if (verbose)
-		fprintf(fp, "TAINTED_MASK: %lx  %s\n", tainted_mask, buf);
-}
-
-static void
 show_kernel_taints(char *buf, int verbose)
 {
 	int i, bx;
 	uint8_t tnt_bit;
 	char tnt_true, tnt_false;
-	int tnts_len;
+	int tnts_len = 0;
 	ulong tnts_addr;
 	ulong tainted_mask, *tainted_mask_ptr;
 	int tainted;
-	struct syment *sp;
+	struct syment *sp = NULL;
 
-	if (VALID_STRUCT(taint_flag) ||
-	    (kernel_symbol_exists("taint_flags") && STRUCT_EXISTS("taint_flag"))) {
-		show_kernel_taints_v4_10(buf, verbose);
-		return;
-	}
-
-	if (!VALID_STRUCT(tnt)) { 
-                STRUCT_SIZE_INIT(tnt, "tnt");
-                MEMBER_OFFSET_INIT(tnt_bit, "tnt", "bit");
-                MEMBER_OFFSET_INIT(tnt_true, "tnt", "true");
-                MEMBER_OFFSET_INIT(tnt_false, "tnt", "false");
-        }
-
-	if (VALID_STRUCT(tnt) && (sp = symbol_search("tnts"))) {
-		tnts_len = get_array_length("tnts", NULL, 0);
-		tnts_addr = sp->value;
-	} else
-		tnts_addr = tnts_len = 0;
-
-	bx = 0;
-	buf[0] = '\0';
-
-	tainted_mask = tainted = 0;
-
-	if (kernel_symbol_exists("tainted_mask")) {
-		get_symbol_data("tainted_mask", sizeof(ulong), &tainted_mask);
-		tainted_mask_ptr = &tainted_mask;
-	} else if (kernel_symbol_exists("tainted")) {
+	if (kernel_symbol_exists("tainted")) {
 		get_symbol_data("tainted", sizeof(int), &tainted);
 		if (verbose)
 			fprintf(fp, "TAINTED: %x\n", tainted);
 		return;
+	} else if (VALID_STRUCT(tnt) ||
+	    (kernel_symbol_exists("tnts") && STRUCT_EXISTS("tnt"))) {
+		if (!VALID_STRUCT(tnt)) {
+			STRUCT_SIZE_INIT(tnt, "tnt");
+			MEMBER_OFFSET_INIT(tnt_bit, "tnt", "bit");
+			MEMBER_OFFSET_INIT(tnt_true, "tnt", "true");
+			MEMBER_OFFSET_INIT(tnt_false, "tnt", "false");
+		}
+
+		tnts_len = get_array_length("tnts", NULL, 0);
+		sp = symbol_search("tnts");
+	} else if (VALID_STRUCT(taint_flag) ||
+	    (kernel_symbol_exists("taint_flags") && STRUCT_EXISTS("taint_flag"))) {
+		if (!(VALID_STRUCT(taint_flag) &&
+					VALID_MEMBER(tnt_true) && VALID_MEMBER(tnt_false))) {
+			STRUCT_SIZE_INIT(taint_flag, "taint_flag");
+			MEMBER_OFFSET_INIT(tnt_true, "taint_flag", "true");
+			MEMBER_OFFSET_INIT(tnt_false, "taint_flag", "false");
+			if (INVALID_MEMBER(tnt_true)) {
+				MEMBER_OFFSET_INIT(tnt_true, "taint_flag", "c_true");
+				MEMBER_OFFSET_INIT(tnt_false, "taint_flag", "c_false");
+			}
+		}
+
+		if (!(pc->flags & RUNTIME)) {
+			if (INVALID_MEMBER(tnt_true) || INVALID_MEMBER(tnt_false) ||
+					!kernel_symbol_exists("tainted_mask"))
+				return;
+		}
+
+		tnts_len = get_array_length("taint_flags", NULL, 0);
+		sp = symbol_search("taint_flags");
 	} else if (verbose)
 		option_not_supported('t');
 
-	for (i = 0; i < (tnts_len * SIZE(tnt)); i += SIZE(tnt)) {
-		readmem((tnts_addr + i) + OFFSET(tnt_bit),
-			KVADDR, &tnt_bit, sizeof(uint8_t), 
-			"tnt bit", FAULT_ON_ERROR);
+	tnts_addr = sp->value;
+	get_symbol_data("tainted_mask", sizeof(ulong), &tainted_mask);
+	tainted_mask_ptr = &tainted_mask;
 
-		if (NUM_IN_BITMAP(tainted_mask_ptr, tnt_bit)) {
-			readmem((tnts_addr + i) + OFFSET(tnt_true),
-				KVADDR, &tnt_true, sizeof(char), 
-				"tnt true", FAULT_ON_ERROR);
+	bx = 0;
+	buf[0] = '\0';
+
+	if (VALID_STRUCT(tnt)) {
+		for (i = 0; i < (tnts_len * SIZE(tnt)); i += SIZE(tnt)) {
+			readmem((tnts_addr + i) + OFFSET(tnt_bit),
+				KVADDR, &tnt_bit, sizeof(uint8_t),
+				"tnt bit", FAULT_ON_ERROR);
+
+			if (NUM_IN_BITMAP(tainted_mask_ptr, tnt_bit)) {
+				readmem((tnts_addr + i) + OFFSET(tnt_true),
+					KVADDR, &tnt_true, sizeof(char),
+					"tnt true", FAULT_ON_ERROR);
+					buf[bx++] = tnt_true;
+			} else {
+				readmem((tnts_addr + i) + OFFSET(tnt_false),
+					KVADDR, &tnt_false, sizeof(char),
+					"tnt false", FAULT_ON_ERROR);
+				if (tnt_false != ' ' && tnt_false != '-' &&
+				    tnt_false != 'G')
+					buf[bx++] = tnt_false;
+			}
+		}
+	} else if (VALID_STRUCT(taint_flag)) {
+		for (i = 0; i < tnts_len; i++) {
+			if (NUM_IN_BITMAP(tainted_mask_ptr, i)) {
+				readmem((tnts_addr + i * SIZE(taint_flag)) +
+						OFFSET(tnt_true),
+						KVADDR, &tnt_true, sizeof(char),
+						"tnt true", FAULT_ON_ERROR);
 				buf[bx++] = tnt_true;
-		} else {
-			readmem((tnts_addr + i) + OFFSET(tnt_false),
-				KVADDR, &tnt_false, sizeof(char), 
-				"tnt false", FAULT_ON_ERROR);
-			if (tnt_false != ' ' && tnt_false != '-' &&
-			    tnt_false != 'G')
-				buf[bx++] = tnt_false;
+			} else {
+				readmem((tnts_addr + i * SIZE(taint_flag)) +
+						OFFSET(tnt_false),
+						KVADDR, &tnt_false, sizeof(char),
+						"tnt false", FAULT_ON_ERROR);
+				if (tnt_false != ' ' && tnt_false != '-' &&
+						tnt_false != 'G')
+					buf[bx++] = tnt_false;
+			}
 		}
 	}
 

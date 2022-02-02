@@ -126,6 +126,7 @@ static int x86_64_get_framesize(struct bt_info *, ulong, ulong);
 static void x86_64_framesize_debug(struct bt_info *);
 static void x86_64_get_active_set(void);
 static int x86_64_get_kvaddr_ranges(struct vaddr_range *);
+static int x86_64_get_cpu_reg(int, int, const char *, int, void *);
 static int x86_64_verify_paddr(uint64_t);
 static void GART_init(void);
 static void x86_64_exception_stacks_init(void);
@@ -194,6 +195,7 @@ x86_64_init(int when)
 		machdep->machspec->irq_eframe_link = UNINITIALIZED;
 		machdep->machspec->irq_stack_gap = UNINITIALIZED;
 		machdep->get_kvaddr_ranges = x86_64_get_kvaddr_ranges;
+		machdep->get_cpu_reg = x86_64_get_cpu_reg;
                 if (machdep->cmdline_args[0])
                         parse_cmdline_args();
 		if ((string = pc->read_vmcoreinfo("relocate"))) {
@@ -884,6 +886,7 @@ x86_64_dump_machdep_table(ulong arg)
         fprintf(fp, "        is_page_ptr: x86_64_is_page_ptr()\n");
         fprintf(fp, "       verify_paddr: x86_64_verify_paddr()\n");
         fprintf(fp, "  get_kvaddr_ranges: x86_64_get_kvaddr_ranges()\n");
+	fprintf(fp, "        get_cpu_reg: x86_64_get_cpu_reg()\n");
         fprintf(fp, "    init_kernel_pgd: x86_64_init_kernel_pgd()\n");
         fprintf(fp, "clear_machdep_cache: x86_64_clear_machdep_cache()\n");
 	fprintf(fp, " xendump_p2m_create: %s\n", PVOPS_XEN() ?
@@ -1285,6 +1288,7 @@ x86_64_per_cpu_init(void)
 	struct machine_specific *ms;
 	struct syment *irq_sp, *curr_sp, *cpu_sp, *hardirq_stack_ptr_sp;
 	ulong hardirq_stack_ptr;
+	ulong __per_cpu_load = 0;
 
 	ms = machdep->machspec;
 
@@ -1326,7 +1330,12 @@ x86_64_per_cpu_init(void)
 	else if (!ms->stkinfo.isize)
 		ms->stkinfo.isize = 16384;
 
+	if (kernel_symbol_exists("__per_cpu_load"))
+		__per_cpu_load = symbol_value("__per_cpu_load");
+
 	for (i = cpus = 0; i < NR_CPUS; i++) {
+		if (__per_cpu_load && kt->__per_cpu_offset[i] == __per_cpu_load)
+			break;
 		if (!readmem(cpu_sp->value + kt->__per_cpu_offset[i],
 		    KVADDR, &cpunumber, sizeof(int),
 		    "cpu number (per_cpu)", QUIET|RETURN_ON_ERROR))
@@ -4409,7 +4418,7 @@ x86_64_function_called_by(ulong rip)
 	if (gdb_pass_through(buf, pc->tmpfile2, GNU_RETURN_ON_ERROR)) {
 	        rewind(pc->tmpfile2);
 	        while (fgets(buf, BUFSIZE, pc->tmpfile2)) {
-			if ((p1 = strstr(buf, "callq")) &&
+			if ((p1 = strstr(buf, "call")) &&
 			    whitespace(*(p1-1))) { 
 				if (extract_hex(p1, &value, NULLCHAR, TRUE)) 
 					break;
@@ -5595,14 +5604,18 @@ x86_64_get_smp_cpus(void)
 	char *cpu_pda_buf;
 	ulong level4_pgt, cpu_pda_addr;
 	struct syment *sp;
+	ulong __per_cpu_load = 0;
 
 	if (!VALID_STRUCT(x8664_pda)) {
 		if (!(sp = per_cpu_symbol_search("per_cpu__cpu_number")) ||
 		    !(kt->flags & PER_CPU_OFF))
 			return 1;
 
+		if (kernel_symbol_exists("__per_cpu_load"))
+			__per_cpu_load = symbol_value("__per_cpu_load");
+
 		for (i = cpus = 0; i < NR_CPUS; i++) {
-			if (kt->__per_cpu_offset[i] == 0)
+			if (__per_cpu_load && kt->__per_cpu_offset[i] == __per_cpu_load)
 				break;
 			if (!readmem(sp->value + kt->__per_cpu_offset[i], 
 			    KVADDR, &cpunumber, sizeof(int),
@@ -6371,11 +6384,13 @@ search_for_switch_to(ulong start, ulong end)
 	char search_string1[BUFSIZE];
 	char search_string2[BUFSIZE];
 	char search_string3[BUFSIZE];
+	char search_string4[BUFSIZE];
 	int found;
 
 	max_instructions = end - start;
 	found = FALSE;
-	search_string1[0] = search_string2[0] = search_string3[0] = NULLCHAR;
+	search_string1[0] = search_string2[0] = NULLCHAR;
+	search_string3[0] = search_string4[0] = NULLCHAR;
 	sprintf(buf1, "x/%ldi 0x%lx", max_instructions, start);
 
 	if (symbol_exists("__switch_to")) {
@@ -6386,7 +6401,9 @@ search_for_switch_to(ulong start, ulong end)
 	}
 	if (symbol_exists("__switch_to_asm")) {
 		sprintf(search_string3, 
-			"callq  0x%lx", symbol_value("__switch_to_asm")); 
+			"callq  0x%lx", symbol_value("__switch_to_asm"));
+		sprintf(search_string4,
+			"call   0x%lx", symbol_value("__switch_to_asm"));
 	}
 
 	open_tmpfile();
@@ -6405,6 +6422,8 @@ search_for_switch_to(ulong start, ulong end)
 		if (strlen(search_string2) && strstr(buf1, search_string2))
 			found = TRUE;
 		if (strlen(search_string3) && strstr(buf1, search_string3))
+			found = TRUE;
+		if (strlen(search_string4) && strstr(buf1, search_string4))
 			found = TRUE;
 	}
 	close_tmpfile();
@@ -6453,7 +6472,6 @@ x86_64_irq_eframe_link_init(void)
 	char buf[BUFSIZE];
 	char link_register[BUFSIZE];
         char *arglist[MAXARGS];
-	ulong max_instructions;
 
 	if (machdep->machspec->irq_eframe_link == UNINITIALIZED)
 		machdep->machspec->irq_eframe_link = 0;
@@ -6468,12 +6486,10 @@ x86_64_irq_eframe_link_init(void)
 		return;
 	}
 
-	max_instructions = spn->value - sp->value;
-
 	open_tmpfile();
 
-        sprintf(buf, "x/%ldi 0x%lx",
-		max_instructions, sp->value);
+        sprintf(buf, "disassemble 0x%lx, 0x%lx",
+		sp->value, spn->value);
 
         if (!gdb_pass_through(buf, pc->tmpfile, GNU_RETURN_ON_ERROR))
 		return;
@@ -6482,6 +6498,8 @@ x86_64_irq_eframe_link_init(void)
 
 	rewind(pc->tmpfile);
         while (fgets(buf, BUFSIZE, pc->tmpfile)) {
+		if (STRNEQ(buf, "Dump of assembler code"))
+			continue;
 		if (!strstr(buf, sp->name))
 			break;
 		if ((c = parse_line(buf, arglist)) < 4)
@@ -7094,7 +7112,8 @@ x86_64_virt_phys_base(void)
 	ulong phys, linux_banner_phys;
 
 	if (!(sp = symbol_search("linux_banner")) ||
-	    !((sp->type == 'R') || (sp->type == 'r')))
+	    !((sp->type == 'R') || (sp->type == 'r') ||
+	    (sp->type == 'D')))
 		return FALSE;
 
 	linux_banner_phys = sp->value - __START_KERNEL_map;
@@ -8219,7 +8238,7 @@ x86_64_do_not_cache_framesize(struct syment *sp, ulong textaddr)
 			return TRUE;
 		}
 
-		if (STREQ(arglist[instr], "callq"))
+		if (STREQ(arglist[instr], "callq") || STREQ(arglist[instr], "call"))
 			break;
 	}
 	close_tmpfile2();
@@ -8915,6 +8934,19 @@ x86_64_get_kvaddr_ranges(struct vaddr_range *vrp)
 	qsort(vrp, cnt, sizeof(struct vaddr_range), compare_kvaddr);
 
 	return cnt;
+}
+
+static int
+x86_64_get_cpu_reg(int cpu, int regno, const char *name,
+                   int size, void *value)
+{
+        if (regno >= LAST_REGNUM)
+                return FALSE;
+
+        if (VMSS_DUMPFILE())
+                return vmware_vmss_get_cpu_reg(cpu, regno, name, size, value);
+
+        return FALSE;
 }
 
 /*

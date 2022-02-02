@@ -217,10 +217,13 @@ arm64_init(int when)
 		arm64_calc_VA_BITS();
 		arm64_calc_KERNELPACMASK();
 		ms = machdep->machspec;
+
+		/* vabits_actual introduced after mm flip, so it should be flipped layout */
 		if (ms->VA_BITS_ACTUAL) {
-			ms->page_offset = ARM64_PAGE_OFFSET_ACTUAL;
-			machdep->identity_map_base = ARM64_PAGE_OFFSET_ACTUAL;
-			machdep->kvbase = ARM64_PAGE_OFFSET_ACTUAL;
+			ms->page_offset = ARM64_FLIP_PAGE_OFFSET;
+			/* useless on arm64 */
+			machdep->identity_map_base = ARM64_FLIP_PAGE_OFFSET;
+			machdep->kvbase = ARM64_FLIP_PAGE_OFFSET;
 			ms->userspace_top = ARM64_USERSPACE_TOP_ACTUAL;
 		} else {
 			ms->page_offset = ARM64_PAGE_OFFSET;
@@ -401,7 +404,7 @@ arm64_init(int when)
 				fprintf(fp, "CONFIG_ARM64_VA_BITS: %ld\n", ms->CONFIG_ARM64_VA_BITS);
 				fprintf(fp, "      VA_BITS_ACTUAL: %ld\n", ms->VA_BITS_ACTUAL);
 				fprintf(fp, "(calculated) VA_BITS: %ld\n", ms->VA_BITS);
-				fprintf(fp, " PAGE_OFFSET: %lx\n", ARM64_PAGE_OFFSET_ACTUAL);
+				fprintf(fp, " PAGE_OFFSET: %lx\n", ARM64_FLIP_PAGE_OFFSET);
 				fprintf(fp, "    VA_START: %lx\n", ms->VA_START);
 				fprintf(fp, "     modules: %lx - %lx\n", ms->modules_vaddr, ms->modules_end);
 				fprintf(fp, "     vmalloc: %lx - %lx\n", ms->vmalloc_start_addr, ms->vmalloc_end);
@@ -560,6 +563,10 @@ arm64_dump_machdep_table(ulong arg)
 		fprintf(fp, "%sMACHDEP_BT_TEXT", others++ ? "|" : "");
 	if (machdep->flags & NEW_VMEMMAP)
 		fprintf(fp, "%sNEW_VMEMMAP", others++ ? "|" : "");
+	if (machdep->flags & FLIPPED_VM)
+		fprintf(fp, "%sFLIPPED_VM", others++ ? "|" : "");
+	if (machdep->flags & HAS_PHYSVIRT_OFFSET)
+		fprintf(fp, "%sHAS_PHYSVIRT_OFFSET", others++ ? "|" : "");
 	fprintf(fp, ")\n");
 
 	fprintf(fp, "              kvbase: %lx\n", machdep->kvbase);
@@ -987,16 +994,20 @@ arm64_calc_physvirt_offset(void)
 	ulong physvirt_offset;
 	struct syment *sp;
 
-	ms->physvirt_offset = ms->phys_offset - ms->page_offset;
-
 	if ((sp = kernel_symbol_search("physvirt_offset")) &&
 			machdep->machspec->kimage_voffset) {
 		if (READMEM(pc->mfd, &physvirt_offset, sizeof(physvirt_offset),
 			sp->value, sp->value -
 			machdep->machspec->kimage_voffset) > 0) {
+				machdep->flags |= HAS_PHYSVIRT_OFFSET;
 				ms->physvirt_offset = physvirt_offset;
+				return;
 		}
 	}
+
+	/* Useless if no symbol 'physvirt_offset', just keep semantics */
+	ms->physvirt_offset = ms->phys_offset - ms->page_offset;
+
 }
 
 static void
@@ -1043,6 +1054,7 @@ arm64_calc_phys_offset(void)
 			if (READMEM(pc->mfd, &phys_offset, sizeof(phys_offset),
 			    vaddr, paddr) > 0) {
 				ms->phys_offset = phys_offset;
+
 				return;
 			}
 		}
@@ -1104,7 +1116,13 @@ arm64_get_section_size_bits(void)
 	int ret;
 	char *string;
 
-	machdep->section_size_bits = _SECTION_SIZE_BITS;
+	if (THIS_KERNEL_VERSION >= LINUX(5,12,0)) {
+		if (machdep->pagesize == 65536)
+			machdep->section_size_bits = _SECTION_SIZE_BITS_5_12_64K;
+		else
+			machdep->section_size_bits = _SECTION_SIZE_BITS_5_12;
+	} else
+		machdep->section_size_bits = _SECTION_SIZE_BITS;
 
 	if ((string = pc->read_vmcoreinfo("NUMBER(SECTION_SIZE_BITS)"))) {
 		machdep->section_size_bits = atol(string);
@@ -1170,6 +1188,21 @@ arm64_init_kernel_pgd(void)
                 vt->kernel_pgd[i] = value;
 }
 
+ulong arm64_PTOV(ulong paddr)
+{
+	struct machine_specific *ms = machdep->machspec;
+
+	/*
+	 * Either older kernel before kernel has 'physvirt_offset' or newer
+	 * kernel which removes 'physvirt_offset' has the same formula:
+	 * #define __phys_to_virt(x)   ((unsigned long)((x) - PHYS_OFFSET) | PAGE_OFFSET)
+	 */
+	if (!(machdep->flags & HAS_PHYSVIRT_OFFSET))
+		return (paddr - ms->phys_offset) | PAGE_OFFSET;
+	else
+		return paddr - ms->physvirt_offset;
+}
+
 ulong
 arm64_VTOP(ulong addr)
 {
@@ -1180,8 +1213,18 @@ arm64_VTOP(ulong addr)
 			return addr - machdep->machspec->kimage_voffset;
 		}
 
-		if (addr >= machdep->machspec->page_offset)
-			return addr + machdep->machspec->physvirt_offset;
+		if (addr >= machdep->machspec->page_offset) {
+			if (machdep->flags & HAS_PHYSVIRT_OFFSET) {
+				return addr + machdep->machspec->physvirt_offset;
+			} else {
+				/*
+				 * Either older kernel before kernel has 'physvirt_offset' or newer
+				 * kernel which removes 'physvirt_offset' has the same formula:
+				 * #define __lm_to_phys(addr)	(((addr) & ~PAGE_OFFSET) + PHYS_OFFSET)
+				 */
+				return (addr & ~PAGE_OFFSET) + machdep->machspec->phys_offset;
+			}
+		}
 		else if (machdep->machspec->kimage_voffset)
 			return addr - machdep->machspec->kimage_voffset;
 		else /* no randomness */
@@ -3661,14 +3704,48 @@ arm64_get_crash_notes(void)
 {
 	struct machine_specific *ms = machdep->machspec;
 	ulong crash_notes;
-	Elf64_Nhdr *note;
+	Elf64_Nhdr *note = NULL;
 	ulong offset;
 	char *buf, *p;
 	ulong *notes_ptrs;
 	ulong i, found;
 
-	if (!symbol_exists("crash_notes"))
+	if (!symbol_exists("crash_notes")) {
+		if (DISKDUMP_DUMPFILE() || KDUMP_DUMPFILE()) {
+			if (!(ms->panic_task_regs = calloc((size_t)kt->cpus, sizeof(struct arm64_pt_regs))))
+				error(FATAL, "cannot calloc panic_task_regs space\n");
+
+			for  (i = found = 0; i < kt->cpus; i++) {
+				if (DISKDUMP_DUMPFILE())
+					note = diskdump_get_prstatus_percpu(i);
+				else if (KDUMP_DUMPFILE())
+					note = netdump_get_prstatus_percpu(i);
+
+				if (!note) {
+					error(WARNING, "cpu %d: cannot find NT_PRSTATUS note\n", i);
+					continue;
+				}
+
+				/*
+				 * Find correct location of note data. This contains elf_prstatus
+				 * structure which has registers etc. for the crashed task.
+				 */
+				offset = sizeof(Elf64_Nhdr);
+				offset = roundup(offset + note->n_namesz, 4);
+				p = (char *)note + offset; /* start of elf_prstatus */
+
+				BCOPY(p + OFFSET(elf_prstatus_pr_reg), &ms->panic_task_regs[i],
+				      sizeof(struct arm64_pt_regs));
+
+				found++;
+			}
+			if (!found) {
+				free(ms->panic_task_regs);
+				ms->panic_task_regs = NULL;
+			}
+		}
 		return;
+	}
 
 	crash_notes = symbol_value("crash_notes");
 
@@ -3936,7 +4013,8 @@ arm64_calc_VA_BITS(void)
 		} else if (ACTIVE())
 			error(FATAL, "cannot determine VA_BITS_ACTUAL: please use /proc/kcore\n");
 		else {
-			if ((string = pc->read_vmcoreinfo("NUMBER(TCR_EL1_T1SZ)"))) {
+			if ((string = pc->read_vmcoreinfo("NUMBER(TCR_EL1_T1SZ)")) ||
+			    (string = pc->read_vmcoreinfo("NUMBER(tcr_el1_t1sz)"))) {
 				/* See ARMv8 ARM for the description of
 				 * TCR_EL1.T1SZ and how it can be used
 				 * to calculate the vabits_actual
@@ -3959,6 +4037,14 @@ arm64_calc_VA_BITS(void)
 				error(FATAL, "cannot determine VA_BITS_ACTUAL\n");
 		}
 
+		if (machdep->machspec->CONFIG_ARM64_VA_BITS)
+			machdep->machspec->VA_BITS = machdep->machspec->CONFIG_ARM64_VA_BITS;
+
+		/*
+		 * The mm flip commit is introduced before 52-bits VA, which is before the
+		 * commit to export NUMBER(TCR_EL1_T1SZ)
+		 */
+		machdep->flags |= FLIPPED_VM;
 		return;
 	}
 

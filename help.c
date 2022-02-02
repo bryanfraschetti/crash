@@ -535,7 +535,7 @@ cmd_help(void)
 	oflag = 0;
 
         while ((c = getopt(argcnt, args, 
-	        "efNDdmM:ngcaBbHhkKsvVoptTzLxOr")) != EOF) {
+	        "efNDdmM:ngcaBbHhkKsvVoptTzLOr")) != EOF) {
                 switch(c)
                 {
 		case 'e':
@@ -549,10 +549,6 @@ cmd_help(void)
 		case 'n':
 		case 'D':
 			dumpfile_memory(DUMPFILE_MEM_DUMP);
-			return;
-
-		case 'x':
-			dump_text_value_cache(VERBOSE);
 			return;
 
 		case 'd':
@@ -666,7 +662,6 @@ cmd_help(void)
 			fprintf(fp, " -T - task_table plus context_array\n");
 			fprintf(fp, " -v - vm_table\n");
 			fprintf(fp, " -V - vm_table (verbose)\n");
-			fprintf(fp, " -x - text cache\n");
 			fprintf(fp, " -z - help options\n");
 			return;
 
@@ -1026,7 +1021,6 @@ char *help_help[] = {
 "    -T - task_table plus context_array",
 "    -v - vm_table",
 "    -V - vm_table (verbose)",
-"    -x - text cache",
 "    -z - help options",
 NULL               
 };
@@ -3899,6 +3893,8 @@ char *help_log[] = {
 "  record format, where the timestamp is contained in each log entry's header.",
 "  ",
 "    -T  Display the message text with human readable timestamp.",
+"        (Be aware that the timestamp could be inaccurate!  The timestamp is",
+"         from local_clock(), which is different from the elapsed wall time.)",
 "    -t  Display the message text without the timestamp; only applicable to the",
 "        variable-length record format.",
 "    -d  Display the dictionary of key/value pair properties that are optionally",
@@ -5716,7 +5712,7 @@ char *help__list[] = {
 "list",
 "linked list",
 "[[-o] offset][-e end][-[s|S] struct[.member[,member] [-l offset]] -[x|d]]"
-"\n       [-r|-B] [-h|-H] start",
+"\n       [-r|-B] [-h [-O head_offset]|-H] start",
 " ",
 "  This command dumps the contents of a linked list.  The entries in a linked",
 "  list are typically data structures that are tied together in one of two",
@@ -5800,6 +5796,15 @@ char *help__list[] = {
 "    -S struct  Similar to -s, but instead of parsing gdb output, member values",
 "               are read directly from memory, so the command works much faster",
 "               for 1-, 2-, 4-, and 8-byte members.",
+"    -O offset  Only used in conjunction with -h; it specifies the offset of",
+"               head node list_head embedded within a data structure which is",
+"               different than the offset of list_head of other nodes embedded",
+"               within a data structure.",
+"               The offset may be entered in either of the following manners:",
+"",
+"                 1. in \"structure.member\" format.",
+"                 2. a number of bytes.",
+"",
 "    -l offset  Only used in conjunction with -s, if the start address argument",
 "               is a pointer to an embedded list head (or any other similar list",
 "               linkage structure whose first member points to the next linkage",
@@ -6116,6 +6121,27 @@ char *help__list[] = {
 "      comm = \"sudo\"",
 "    ffff88005ac10180",
 "      comm = \"crash\"",
+"",
+"  To display a liked list whose head node and other nodes are embedded within",
+"  either same or different data structures resulting in different offsets for",
+"  head node and other nodes, e.g. dentry.d_subdirs and dentry.d_child, the",
+"  -O option can be used:",
+"",
+"    %s> list -o dentry.d_child -s dentry.d_name.name -O dentry.d_subdirs -h ffff9c585b81a180",
+"    ffff9c585b9cb140",
+"      d_name.name = 0xffff9c585b9cb178 ccc.txt",
+"    ffff9c585b9cb980",
+"      d_name.name = 0xffff9c585b9cb9b8 bbb.txt",
+"    ffff9c585b9cb740",
+"      d_name.name = 0xffff9c585b9cb778 aaa.txt",
+"",
+"  The dentry.d_subdirs example above is equal to the following sequence:",
+"",
+"    %s> struct -o dentry.d_subdirs ffff9c585b81a180",
+"    struct dentry {",
+"      [ffff9c585b81a220] struct list_head d_subdirs;",
+"    }",
+"    %s> list -o dentry.d_child -s dentry.d_name.name -H ffff9c585b81a220",
 NULL               
 };
 
@@ -6571,7 +6597,7 @@ char *help_kmem[] = {
 "kmem",
 "kernel memory",
 "[-f|-F|-c|-C|-i|-v|-V|-n|-z|-o|-h] [-p | -m member[,member]]\n"
-"       [[-s|-S|-r] [slab] [-I slab[,slab]]] [-g [flags]] [[-P] address]]",
+"       [[-s|-S|-S=cpu[s]|-r] [slab] [-I slab[,slab]]] [-g [flags]] [[-P] address]]",
 "  This command displays information about the use of kernel memory.\n",
 "        -f  displays the contents of the system free memory headers.",
 "            also verifies that the page count equals nr_free_pages.",
@@ -6584,10 +6610,13 @@ char *help_kmem[] = {
 "            kernels, the vm_zone_stat, vm_node_stat and vm_numa_stat tables,",
 "            the cumulative page_states counter values if they exist, and/or ",
 "            the cumulative, vm_event_states counter values if they exist.",
-"        -n  display memory node, memory section, and memory block data",
-"            and state; the state of each memory section state is encoded",
-"            as \"P\", \"M\", \"O\" and/or \"E\", meaning SECTION_MARKED_PRESENT,",
-"            SECTION_HAS_MEM_MAP, SECTION_IS_ONLINE and SECTION_IS_EARLY.",
+"        -n  display memory node, memory section, memory block data and state;",
+"            the state of each memory section is shown as the following flags:",
+"              \"P\": SECTION_MARKED_PRESENT",
+"              \"M\": SECTION_HAS_MEM_MAP",
+"              \"O\": SECTION_IS_ONLINE",
+"              \"E\": SECTION_IS_EARLY",
+"              \"D\": SECTION_TAINT_ZONE_DEVICE",
 "        -z  displays per-zone memory statistics.",
 "        -o  displays each cpu's offset value that is added to per-cpu symbol",
 "            values to translate them into kernel virtual addresses.",
@@ -6616,6 +6645,9 @@ char *help_kmem[] = {
 "            slab data for each per-cpu slab is displayed, along with the",
 "            address of each kmem_cache_node, its count of full and partial",
 "            slabs, and a list of all tracked slabs.",
+"            Note: one can specify the per-cpu slab data to be displayed;",
+"            the cpu[s] can be given as \"1,3,5\", \"1-3\", \"1,3,5-7,10\",",
+"            \"all\", or \"a\" (shortcut for \"all\").",
 "        -r  displays the accumulated basic kmalloc() slab data of each",
 "            root slab cache and its children.  The kernel must contain the",
 "            \"slab_root_caches\" list_head. (currently only available if",
@@ -8266,6 +8298,7 @@ char *version_info[] = {
 "Copyright (C) 2005, 2011, 2020-2021  NEC Corporation",
 "Copyright (C) 1999, 2002, 2007  Silicon Graphics, Inc.",
 "Copyright (C) 1999, 2000, 2001, 2002  Mission Critical Linux, Inc.",
+"Copyright (C) 2015, 2021  VMware, Inc.",
 "This program is free software, covered by the GNU General Public License,",
 "and you are welcome to change it and/or distribute copies of it under",
 "certain conditions.  Enter \"help copying\" to see the conditions.",
@@ -9384,8 +9417,8 @@ README_ENTER_DIRECTORY,
 "  Traditionally when vmcores are compressed via the makedumpfile(8) facility",
 "  the libz compression library is used, and by default the crash utility",
 "  only supports libz.  Recently makedumpfile has been enhanced to optionally",
-"  use either the LZO or snappy compression libraries.  To build crash with",
-"  either or both of those libraries, type \"make lzo\" or \"make snappy\".",
+"  use the LZO, snappy or zstd compression libraries.  To build crash with any",
+"  or all of those libraries, type \"make lzo\", \"make snappy\" or \"make zstd\".",
 "",
 "  crash supports valgrind Memcheck tool on the crash's custom memory allocator.",
 "  To build crash with this feature enabled, type \"make valgrind\" and then run",

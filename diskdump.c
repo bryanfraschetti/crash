@@ -74,6 +74,7 @@ struct diskdump_data {
 	ulong	evictions;		/* total evictions done */
 	ulong	cached_reads;
 	ulong  *valid_pages;
+	int     max_sect_len;           /* highest bucket of valid_pages */
 	ulong   accesses;
 	ulong	snapshot_task;
 };
@@ -509,6 +510,27 @@ arm_kdump_header_adjust(int header_version)
 }
 #endif  /* __i386__ && (ARM || MIPS) */
 
+/*
+ * Read page descriptor.
+ */
+static int
+read_pd(int fd, off_t offset, page_desc_t *pd)
+{
+	const off_t failed = (off_t)-1;
+
+	if (FLAT_FORMAT()) {
+		if (!read_flattened_format(fd, offset, pd, sizeof(*pd)))
+			return READ_ERROR;
+	} else {
+		if (lseek(fd, offset, SEEK_SET) == failed)
+			return SEEK_ERROR;
+		if (read(fd, pd, sizeof(*pd)) != sizeof(*pd))
+			return READ_ERROR;
+	}
+
+	return 0;
+}
+
 static int 
 read_dump_header(char *file)
 {
@@ -877,6 +899,7 @@ restart:
 	}
 
 	dd->valid_pages = calloc(sizeof(ulong), max_sect_len + 1);
+	dd->max_sect_len = max_sect_len;
 	for (i = 1; i < max_sect_len + 1; i++) {
 		dd->valid_pages[i] = dd->valid_pages[i - 1];
 		for (j = 0; j < BITMAP_SECT_LEN; j++, pfn++)
@@ -977,6 +1000,9 @@ is_diskdump(char *file)
 
 #ifdef SNAPPY
 	dd->flags |= SNAPPY_SUPPORTED;
+#endif
+#ifdef ZSTD
+	dd->flags |= ZSTD_SUPPORTED;
 #endif
 
 	pc->read_vmcoreinfo = vmcoreinfo_read_string;
@@ -1101,6 +1127,9 @@ cache_page(physaddr_t paddr)
 	const int block_size = dd->block_size;
 	const off_t failed = (off_t)-1;
 	ulong retlen;
+#ifdef ZSTD
+	static ZSTD_DCtx *dctx = NULL;
+#endif
 
 	for (i = found = 0; i < DISKDUMP_CACHED_PAGES; i++) {
 		if (DISKDUMP_VALID_PAGE(dd->page_cache_hdr[i].pg_flags))
@@ -1128,15 +1157,9 @@ cache_page(physaddr_t paddr)
 			+ (off_t)(desc_pos - 1)*sizeof(page_desc_t);
 
 	/* read page descriptor */
-	if (FLAT_FORMAT()) {
-		if (!read_flattened_format(dd->dfd, seek_offset, &pd, sizeof(pd)))
-			return READ_ERROR;
-	} else {
-		if (lseek(dd->dfd, seek_offset, SEEK_SET) == failed)
-			return SEEK_ERROR;
-		if (read(dd->dfd, &pd, sizeof(pd)) != sizeof(pd))
-			return READ_ERROR;
-	}
+	ret = read_pd(dd->dfd, seek_offset, &pd);
+	if (ret)
+		return ret;
 
 	/* sanity check */
 	if (pd.size > block_size)
@@ -1146,10 +1169,9 @@ cache_page(physaddr_t paddr)
 	if (FLAT_FORMAT()) {
 		if (!read_flattened_format(dd->dfd, pd.offset, dd->compressed_page, pd.size))
 			return READ_ERROR;
-	} else if (is_incomplete_dump() && (0 == pd.offset)) {
+	} else if (0 == pd.offset) {
 		/*
-		 *  If the incomplete flag has been set in the header, 
-		 *  first check whether zero_excluded has been set.
+		 *  First check whether zero_excluded has been set.
 		 */
 		if (*diskdump_flags & ZERO_EXCLUDED) {
 			if (CRASHDEBUG(8))
@@ -1158,8 +1180,15 @@ cache_page(physaddr_t paddr)
 				    "paddr/pfn: %llx/%lx\n", 
 					(ulonglong)paddr, pfn);
 			memset(dd->compressed_page, 0, dd->block_size);
-		} else
-			return READ_ERROR;
+		} else {
+			if (CRASHDEBUG(8))
+				fprintf(fp,
+					"read_diskdump/cache_page: "
+					"descriptor with zero offset found at "
+					"paddr/pfn/pos: %llx/%lx/%lx\n",
+					(ulonglong)paddr, pfn, desc_pos);
+			return PAGE_INCOMPLETE;
+		}
 	} else {
 		if (lseek(dd->dfd, pd.offset, SEEK_SET) == failed)
 			return SEEK_ERROR;
@@ -1226,6 +1255,33 @@ cache_page(physaddr_t paddr)
 			error(INFO, "%s: uncompress failed: %d\n", 
 			      DISKDUMP_VALID() ? "diskdump" : "compressed kdump",
 			      ret);
+			return READ_ERROR;
+		}
+#endif
+	} else if (pd.flags & DUMP_DH_COMPRESSED_ZSTD) {
+
+		if (!(dd->flags & ZSTD_SUPPORTED)) {
+			error(INFO, "%s: uncompess failed: no zstd compression support\n",
+				DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
+			return READ_ERROR;
+		}
+#ifdef ZSTD
+		if (!dctx) {
+			dctx = ZSTD_createDCtx();
+			if (!dctx) {
+				error(INFO, "%s: uncompess failed: cannot create ZSTD_DCtx\n",
+					DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
+				return READ_ERROR;
+			}
+		}
+
+		retlen = ZSTD_decompressDCtx(dctx,
+				dd->page_cache_hdr[i].pg_bufptr, block_size,
+				dd->compressed_page, pd.size);
+		if (ZSTD_isError(retlen) || (retlen != block_size)) {
+			error(INFO, "%s: uncompress failed: %d (%s)\n",
+				DISKDUMP_VALID() ? "diskdump" : "compressed kdump",
+				retlen, ZSTD_getErrorName(retlen));
 			return READ_ERROR;
 		}
 #endif
@@ -1700,7 +1756,7 @@ dump_note_offsets(FILE *fp)
 			qemu = FALSE;
 			if (machine_type("X86_64") || machine_type("S390X") ||
 			    machine_type("ARM64") || machine_type("PPC64") ||
-			    machine_type("SPARC64")) {
+			    machine_type("SPARC64") || machine_type("MIPS64")) {
 				note64 = (void *)dd->notes_buf + tot;
 				len = sizeof(Elf64_Nhdr);
 				if (STRNEQ((char *)note64 + len, "QEMU"))
@@ -1783,6 +1839,8 @@ __diskdump_memory_dump(FILE *fp)
 		fprintf(fp, "%sLZO_SUPPORTED", others++ ? "|" : "");
 	if (dd->flags & SNAPPY_SUPPORTED)
 		fprintf(fp, "%sSNAPPY_SUPPORTED", others++ ? "|" : "");
+	if (dd->flags & ZSTD_SUPPORTED)
+		fprintf(fp, "%sZSTD_SUPPORTED", others++ ? "|" : "");
         fprintf(fp, ") %s\n", FLAT_FORMAT() ? "[FLAT]" : "");
         fprintf(fp, "               dfd: %d\n", dd->dfd);
         fprintf(fp, "               ofp: %lx\n", (ulong)dd->ofp);
@@ -1849,6 +1907,8 @@ __diskdump_memory_dump(FILE *fp)
 			fprintf(fp, "DUMP_DH_COMPRESSED_LZO");
 		if (dh->status & DUMP_DH_COMPRESSED_SNAPPY)
 			fprintf(fp, "DUMP_DH_COMPRESSED_SNAPPY");
+		if (dh->status & DUMP_DH_COMPRESSED_ZSTD)
+			fprintf(fp, "DUMP_DH_COMPRESSED_ZSTD");
 		if (dh->status & DUMP_DH_COMPRESSED_INCOMPLETE)
 			fprintf(fp, "DUMP_DH_COMPRESSED_INCOMPLETE");
 		if (dh->status & DUMP_DH_EXCLUDED_VMEMMAP)
@@ -2083,6 +2143,7 @@ __diskdump_memory_dump(FILE *fp)
 	else
 		fprintf(fp, "\n");
 	fprintf(fp, "       valid_pages: %lx\n", (ulong)dd->valid_pages);
+	fprintf(fp, " total_valid_pages: %ld\n", dd->valid_pages[dd->max_sect_len]);
 
 	return 0;
 }
@@ -2532,13 +2593,22 @@ diskdump_kaslr_check()
 	return FALSE;
 }
 
-#ifdef X86_64
 int
 diskdump_get_nr_cpus(void)
 {
-	return dd->num_qemu_notes;
+        if (dd->num_prstatus_notes)
+                return dd->num_prstatus_notes;
+        else if (dd->num_qemu_notes)
+                return dd->num_qemu_notes;
+        else if (dd->num_vmcoredd_notes)
+                return dd->num_vmcoredd_notes;
+        else if (dd->header->nr_cpus)
+                return dd->header->nr_cpus;
+
+        return 1;
 }
 
+#ifdef X86_64
 QEMUCPUState *
 diskdump_get_qemucpustate(int cpu)
 {

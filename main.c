@@ -1119,7 +1119,7 @@ setup_environment(int argc, char **argv)
 	pc->flags2 |= REDZONE;
 	pc->confd = -2;
 	pc->machine_type = MACHINE_TYPE;
-	if (file_exists("/dev/mem", NULL)) {     /* defaults until argv[] is parsed */
+	if (file_readable("/dev/mem")) {     /* defaults until argv[] is parsed */
 		pc->readmem = read_dev_mem;
 		pc->writemem = write_dev_mem;
 	} else if (file_exists("/proc/kcore", NULL)) {
@@ -1704,7 +1704,6 @@ dump_program_context(void)
 	fprintf(fp, "    gdb_sigaction: %lx\n", (ulong)&pc->gdb_sigaction);
 	fprintf(fp, "    main_loop_env: %lx\n", (ulong)&pc->main_loop_env);
 	fprintf(fp, " foreach_loop_env: %lx\n", (ulong)&pc->foreach_loop_env);
-	fprintf(fp, "gdb_interface_env: %lx\n", (ulong)&pc->gdb_interface_env);
 	fprintf(fp, "     termios_orig: %lx\n", (ulong)&pc->termios_orig);
 	fprintf(fp, "      termios_raw: %lx\n", (ulong)&pc->termios_raw);
 	fprintf(fp, "            ncmds: %d\n", pc->ncmds);
