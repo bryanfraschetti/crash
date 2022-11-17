@@ -440,6 +440,8 @@ task_init(void)
 		}
 	} else if ((symbol_exists("dd_init_queue") &&
 	    gdb_set_crash_scope(symbol_value("dd_init_queue"), "dd_init_queue")) ||
+	    (symbol_exists("dd_init_sched") &&
+	    gdb_set_crash_scope(symbol_value("dd_init_sched"), "dd_init_sched")) ||
 	    (symbol_exists("deadline_init_queue") &&
 	    gdb_set_crash_scope(symbol_value("deadline_init_queue"), "deadline_init_queue"))) {
 		char buf[BUFSIZE];
@@ -689,6 +691,16 @@ task_init(void)
 		initialize_task_state();
 
 	stack_overflow_check_init();
+
+	if (machdep->hz) {
+		ulonglong uptime_jiffies;
+		ulong  uptime_sec;
+
+		get_uptime(NULL, &uptime_jiffies);
+		uptime_sec = (uptime_jiffies)/(ulonglong)machdep->hz;
+		kt->boot_date.tv_sec = kt->date.tv_sec - uptime_sec;
+		kt->boot_date.tv_nsec = 0;
+	}
 
 	tt->flags |= TASK_INIT_DONE;
 }
@@ -2935,6 +2947,7 @@ add_context(ulong task, char *tp)
 	tg = tt->tgid_array + tt->running_tasks;
 	tg->tgid = *tgid_addr;
 	tg->task = task;
+	tg->rss_cache = UNINITIALIZED;
 
         if (do_verify && !verify_task(tc, do_verify)) {
 		error(INFO, "invalid task address: %lx\n", tc->task);
@@ -3423,7 +3436,8 @@ parse_task_thread(int argcnt, char *arglist[], struct task_context *tc) {
         while (fgets(buf, BUFSIZE, pc->tmpfile)) {
 		if (STREQ(buf, "  {\n"))
 			randomized = TRUE;
-		else if (randomized && STREQ(buf, "  }, \n"))
+		else if (randomized &&
+			 (STREQ(buf, "  }, \n") || STREQ(buf, "  },\n")))
 			randomized = FALSE;
 
 		if (strlen(lookfor2)) {
@@ -3815,7 +3829,7 @@ show_ps_data(ulong flag, struct task_context *tc, struct psinfo *psi)
 	} else
 		fprintf(fp, "  ");
 
-	fprintf(fp, "%5ld  %5ld  %2s  %s %3s",
+	fprintf(fp, "%7ld %7ld %3s  %s %3s",
 		tc->pid, task_to_pid(tc->ptask),
 		task_cpu(tc->processor, buf2, !VERBOSE),
 		task_pointer_string(tc, flag & PS_KSTACKP, buf3),
@@ -3825,8 +3839,8 @@ show_ps_data(ulong flag, struct task_context *tc, struct psinfo *psi)
 	if (strlen(buf1) == 3)
 		mkstring(buf1, 4, CENTER|RJUST, NULL);
 	fprintf(fp, "%s ", buf1);
-	fprintf(fp, "%7ld ", (tm->total_vm * PAGESIZE())/1024);
-	fprintf(fp, "%6ld  ", (tm->rss * PAGESIZE())/1024);
+	fprintf(fp, "%8ld ", (tm->total_vm * PAGESIZE())/1024);
+	fprintf(fp, "%8ld  ", (tm->rss * PAGESIZE())/1024);
 	if (is_kernel_thread(tc->task))
 		fprintf(fp, "[%s]\n", tc->comm);
 	else
@@ -3843,7 +3857,7 @@ show_ps(ulong flag, struct psinfo *psi)
 
 	if (!(flag & ((PS_EXCLUSIVE & ~PS_ACTIVE)|PS_NO_HEADER))) 
 		fprintf(fp, 
-		    "   PID    PPID  CPU %s  ST  %%MEM     VSZ    RSS  COMM\n",
+		    "      PID    PPID  CPU %s  ST  %%MEM      VSZ      RSS  COMM\n",
 			flag & PS_KSTACKP ?
 			mkstring(buf, VADDR_PRLEN, CENTER|RJUST, "KSTACKP") :
 			mkstring(buf, VADDR_PRLEN, CENTER, "TASK"));
@@ -4650,8 +4664,6 @@ show_task_times(struct task_context *tcp, ulong flags)
 static int
 start_time_timespec(void)
 {
-        char buf[BUFSIZE];
-
 	switch(tt->flags & (TIMESPEC | NO_TIMESPEC | START_TIME_NSECS))
 	{
 	case TIMESPEC:
@@ -4665,24 +4677,11 @@ start_time_timespec(void)
 
 	tt->flags |= NO_TIMESPEC;
 
-        open_tmpfile();
-        sprintf(buf, "ptype struct task_struct");
-        if (!gdb_pass_through(buf, NULL, GNU_RETURN_ON_ERROR)) {
-                close_tmpfile();
-                return FALSE;
-        }
-
-        rewind(pc->tmpfile);
-        while (fgets(buf, BUFSIZE, pc->tmpfile)) {
-                if (strstr(buf, "start_time;")) {
-			if (strstr(buf, "struct timespec")) {
-				tt->flags &= ~NO_TIMESPEC;
-				tt->flags |= TIMESPEC;
-			}
-		}
-        }
-
-        close_tmpfile();
+	if (VALID_MEMBER(task_struct_start_time) &&
+	    STREQ(MEMBER_TYPE_NAME("task_struct", "start_time"), "timespec")) {
+			tt->flags &= ~NO_TIMESPEC;
+			tt->flags |= TIMESPEC;
+	}
 
 	if ((tt->flags & NO_TIMESPEC) && (SIZE(task_struct_start_time) == 8)) {
 		tt->flags &= ~NO_TIMESPEC;
@@ -7715,7 +7714,7 @@ print_task_header(FILE *out, struct task_context *tc, int newline)
 	char buf[BUFSIZE];
 	char buf1[BUFSIZE];
 
-        fprintf(out, "%sPID: %-5ld  TASK: %s  CPU: %-2s  COMMAND: \"%s\"\n",
+        fprintf(out, "%sPID: %-7ld  TASK: %s  CPU: %-3s  COMMAND: \"%s\"\n",
 		newline ? "\n" : "", tc->pid, 
 		mkstring(buf1, VADDR_PRLEN, LJUST|LONG_HEX, MKSTR(tc->task)),
 		task_cpu(tc->processor, buf, !VERBOSE), tc->comm);
@@ -11202,7 +11201,7 @@ check_stack_overflow(void)
 {
 	int i, overflow, cpu_size, cpu, total;
 	char buf[BUFSIZE];
-	ulong magic, task, stackbase;
+	ulong magic, task, stackbase, location;
 	struct task_context *tc;
 
 	if (!tt->stack_end_magic && 
@@ -11286,9 +11285,15 @@ check_stack_end_magic:
 		if (magic != STACK_END_MAGIC) {
 			if (!overflow)
 				print_task_header(fp, tc, 0);
+
+			if (tt->flags & THREAD_INFO_IN_TASK)
+				location = task_to_stackbase(tc->task);
+			else
+				location = tc->thread_info + SIZE(thread_info);
+
 			fprintf(fp, 
 			    "  possible stack overflow: %lx: %lx != STACK_END_MAGIC\n",
-				tc->thread_info + SIZE(thread_info), magic);
+				location, magic);
 			overflow++, total++;
 		}
 

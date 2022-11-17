@@ -111,8 +111,7 @@ map_cpus_to_prstatus_kdump_cmprs(void)
 	if (pc->flags2 & QEMU_MEM_DUMP_COMPRESSED)  /* notes exist for all cpus */
 		goto resize_note_pointers;
 
-	if (!(online = get_cpus_online()) || (online == kt->cpus) || 
-	    machine_type("ARM64"))
+	if (!(online = get_cpus_online()) || (online == kt->cpus))
 		goto resize_note_pointers;
 
 	if (CRASHDEBUG(1))
@@ -539,15 +538,13 @@ read_dump_header(char *file)
 	struct kdump_sub_header *sub_header_kdump = NULL;
 	size_t size;
 	off_t bitmap_len;
-	char *bufptr;
-	size_t len;
-	ssize_t bytes_read;
 	int block_size = (int)sysconf(_SC_PAGESIZE);
 	off_t offset;
 	const off_t failed = (off_t)-1;
 	ulong pfn;
 	int i, j, max_sect_len;
 	int is_split = 0;
+	ulonglong tmp, *bitmap;
 
 	if (block_size < 0)
 		return FALSE;
@@ -724,10 +721,6 @@ restart:
 
 	offset = (off_t)block_size * (1 + header->sub_hdr_size);
 
-	if ((dd->bitmap = malloc(bitmap_len)) == NULL)
-		error(FATAL, "%s: cannot malloc bitmap buffer\n",
-			DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
-
 	dd->dumpable_bitmap = calloc(bitmap_len, 1);
 
 	if (CRASHDEBUG(8))
@@ -736,30 +729,23 @@ restart:
 			(ulonglong)offset);
 
 	if (FLAT_FORMAT()) {
+		if ((dd->bitmap = malloc(bitmap_len)) == NULL)
+			error(FATAL, "%s: cannot malloc bitmap buffer\n",
+				DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
+
 		if (!read_flattened_format(dd->dfd, offset, dd->bitmap, bitmap_len)) {
 			error(INFO, "%s: cannot read memory bitmap\n",
 				DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
 			goto err;
 		}
 	} else {
-		if (lseek(dd->dfd, offset, SEEK_SET) == failed) {
-			error(INFO, "%s: cannot lseek memory bitmap\n",
+		dd->bitmap = mmap(NULL, bitmap_len, PROT_READ,
+					MAP_SHARED, dd->dfd, offset);
+		if (dd->bitmap == MAP_FAILED)
+			error(FATAL, "%s: cannot mmap bitmap buffer\n",
 				DISKDUMP_VALID() ? "diskdump" : "compressed kdump");
-			goto err;
-		}
-		bufptr = dd->bitmap;
-		len = bitmap_len;
-		while (len) {
-			bytes_read = read(dd->dfd, bufptr, len);
-			if (bytes_read <= 0) {
-				error(INFO, "%s: cannot read memory bitmap\n",
-					DISKDUMP_VALID() ? "diskdump"
-					: "compressed kdump");
-				goto err;
-			}
-			len -= bytes_read;
-			bufptr += bytes_read;
-		}
+
+		madvise(dd->bitmap, bitmap_len, MADV_WILLNEED);
 	}
 
 	if (dump_is_partial(header))
@@ -900,11 +886,16 @@ restart:
 
 	dd->valid_pages = calloc(sizeof(ulong), max_sect_len + 1);
 	dd->max_sect_len = max_sect_len;
+
+	/* It is safe to convert it to (ulonglong *). */
+	bitmap = (ulonglong *)dd->dumpable_bitmap;
 	for (i = 1; i < max_sect_len + 1; i++) {
 		dd->valid_pages[i] = dd->valid_pages[i - 1];
-		for (j = 0; j < BITMAP_SECT_LEN; j++, pfn++)
-			if (page_is_dumpable(pfn))
-				dd->valid_pages[i]++;
+		for (j = 0; j < BITMAP_SECT_LEN; j += 64, pfn += 64) {
+			tmp = bitmap[pfn >> 6];
+			if (tmp)
+				dd->valid_pages[i] += hweight64(tmp);
+		}
 	}
 
         return TRUE;
@@ -915,8 +906,12 @@ err:
 		free(sub_header);
 	if (sub_header_kdump)
 		free(sub_header_kdump);
-	if (dd->bitmap)
-		free(dd->bitmap);
+	if (dd->bitmap) {
+		if (FLAT_FORMAT())
+			free(dd->bitmap);
+		else
+			munmap(dd->bitmap, dd->bitmap_len);
+	}
 	if (dd->dumpable_bitmap)
 		free(dd->dumpable_bitmap);
 	if (dd->notes_buf)

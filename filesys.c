@@ -319,7 +319,7 @@ match_proc_version(void)
 
 #define CREATE  1
 #define DESTROY 0
-#define DEFAULT_SEARCHDIRS 5
+#define DEFAULT_SEARCHDIRS 6
 #define EXTRA_SEARCHDIRS 5
 
 static char **
@@ -336,6 +336,7 @@ build_searchdirs(int create, int *preferred)
         	"/boot/",
 	        "/boot/efi/redhat",
 		"/boot/efi/EFI/redhat",
+		"/usr/lib/debug/boot/",
         	"/",
         	NULL
 	};
@@ -715,7 +716,7 @@ mount_point(char *name)
 				continue;
 			found++;
 		}
-		pclose(mp);
+		fclose(mp);
 
 		if (!(mount_points = (char **)malloc(sizeof(char *) * found)))
 			return FALSE;
@@ -735,7 +736,7 @@ mount_point(char *name)
                         	mount_points_gathered++, i++;
 			}
                 }
-        	pclose(mp);
+		fclose(mp);
 
 		if (CRASHDEBUG(2))
 			for (i = 0; i < mount_points_gathered; i++)

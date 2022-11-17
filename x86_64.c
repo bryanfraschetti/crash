@@ -208,6 +208,10 @@ x86_64_init(int when)
 			machdep->machspec->kernel_image_size = dtol(string, QUIET, NULL);
 			free(string);
 		}
+		if ((string = pc->read_vmcoreinfo("NUMBER(sme_mask)"))) {
+			machdep->machspec->sme_mask = dtol(string, QUIET, NULL);
+			free(string);
+		}
 		if (SADUMP_DUMPFILE() || QEMU_MEM_DUMP_NO_VMCOREINFO() ||
 		    VMSS_DUMPFILE())
 			/* Need for calculation of kaslr_offset and phys_base */
@@ -372,9 +376,8 @@ x86_64_init(int when)
 		}
 
 		/*
-		 *  Check for CONFIG_RANDOMIZE_MEMORY, and set page_offset here.
-		 *  The remainder of the virtual address range setups will get
-		 *  done below in POST_GDB.
+		 *  Check for CONFIG_RANDOMIZE_MEMORY, and set page_offset and
+		 *  the virtual address ranges.
 		 */
 		if (kernel_symbol_exists("page_offset_base") &&
 		    kernel_symbol_exists("vmalloc_base")) {
@@ -384,6 +387,31 @@ x86_64_init(int when)
 				"page_offset_base", QUIET|FAULT_ON_ERROR);
 			machdep->kvbase = machdep->machspec->page_offset;
 			machdep->identity_map_base = machdep->machspec->page_offset;
+
+			readmem(symbol_value("vmalloc_base"), KVADDR,
+					&machdep->machspec->vmalloc_start_addr,
+					sizeof(ulong), "vmalloc_base", FAULT_ON_ERROR);
+			if (machdep->flags & VM_5LEVEL)
+				machdep->machspec->vmalloc_end =
+					machdep->machspec->vmalloc_start_addr + TERABYTES(1280) - 1;
+			else
+				machdep->machspec->vmalloc_end =
+					machdep->machspec->vmalloc_start_addr + TERABYTES(32) - 1;
+			if (kernel_symbol_exists("vmemmap_base")) {
+				readmem(symbol_value("vmemmap_base"), KVADDR,
+					&machdep->machspec->vmemmap_vaddr, sizeof(ulong),
+					"vmemmap_base", FAULT_ON_ERROR);
+				machdep->machspec->vmemmap_end =
+					machdep->machspec->vmemmap_vaddr +
+					TERABYTES(1) - 1;
+			} else {
+				machdep->machspec->vmemmap_vaddr = VMEMMAP_VADDR_2_6_31;
+				machdep->machspec->vmemmap_end = VMEMMAP_END_2_6_31;
+			}
+			machdep->machspec->modules_vaddr = __START_KERNEL_map +
+				(machdep->machspec->kernel_image_size ?
+				machdep->machspec->kernel_image_size : GIGABYTES(1));
+			machdep->machspec->modules_end = MODULES_END_2_6_31;
 		}
 		break;
 
@@ -414,32 +442,7 @@ x86_64_init(int when)
 			machdep->machspec->modules_end = MODULES_END_2_6_27;
 		}
 		if (THIS_KERNEL_VERSION >= LINUX(2,6,31)) {
-			if (machdep->flags & RANDOMIZED) {
-				readmem(symbol_value("vmalloc_base"), KVADDR,
-					&machdep->machspec->vmalloc_start_addr,
-					sizeof(ulong), "vmalloc_base", FAULT_ON_ERROR);
-				if (machdep->flags & VM_5LEVEL)
-					machdep->machspec->vmalloc_end =
-						machdep->machspec->vmalloc_start_addr + TERABYTES(1280) - 1;
-				else
-					machdep->machspec->vmalloc_end =
-						machdep->machspec->vmalloc_start_addr + TERABYTES(32) - 1;
-				if (kernel_symbol_exists("vmemmap_base")) {
-					readmem(symbol_value("vmemmap_base"), KVADDR,
-						&machdep->machspec->vmemmap_vaddr, sizeof(ulong),
-						"vmemmap_base", FAULT_ON_ERROR);
-					machdep->machspec->vmemmap_end = 
-						machdep->machspec->vmemmap_vaddr +
-						TERABYTES(1) - 1;
-				} else {
-					machdep->machspec->vmemmap_vaddr = VMEMMAP_VADDR_2_6_31;
-					machdep->machspec->vmemmap_end = VMEMMAP_END_2_6_31;
-				}
-				machdep->machspec->modules_vaddr = __START_KERNEL_map + 
-					(machdep->machspec->kernel_image_size ?
-					machdep->machspec->kernel_image_size : GIGABYTES(1));
-				machdep->machspec->modules_end = MODULES_END_2_6_31;
-			} else {
+			if (!(machdep->flags & RANDOMIZED)) {
 				machdep->machspec->vmalloc_start_addr = VMALLOC_START_ADDR_2_6_31;
 				machdep->machspec->vmalloc_end = VMALLOC_END_2_6_31;
 				machdep->machspec->vmemmap_vaddr = VMEMMAP_VADDR_2_6_31;
@@ -941,6 +944,7 @@ x86_64_dump_machdep_table(ulong arg)
 			ms->kernel_image_size/MEGABYTES(1));
 	else
 		fprintf(fp, "(uninitialized)\n");
+	fprintf(fp, "                 sme_mask: %lx\n", ms->sme_mask);
 	fprintf(fp, "      physical_mask_shift: %ld\n", ms->physical_mask_shift);
 	fprintf(fp, "              pgdir_shift: %ld\n", ms->pgdir_shift);
 	fprintf(fp, "               GART_start: %lx\n", ms->GART_start);
@@ -1818,7 +1822,7 @@ x86_64_kpgd_offset(ulong kvaddr, int verbose, int IS_XEN)
 		if (IS_XEN)
 			fprintf(fp, "PAGE DIRECTORY: %lx [machine]\n", *pgd);
 		else
-			fprintf(fp, "PAGE DIRECTORY: %lx\n", *pgd);
+			fprintf(fp, "PAGE DIRECTORY: %lx\n", *pgd & ~machdep->machspec->sme_mask);
 	}
 
 	return pgd;
@@ -1855,7 +1859,8 @@ x86_64_upgd_offset_legacy(struct task_context *tc, ulong uvaddr, int verbose, in
 		if (IS_XEN)
 			fprintf(fp, "   PGD: %lx => %lx [machine]\n", (ulong)pud, pud_pte);
 		else
-			fprintf(fp, "   PGD: %lx => %lx\n", (ulong)pud, pud_pte);
+			fprintf(fp, "   PGD: %lx => %lx\n",
+				(ulong)pud, pud_pte & ~machdep->machspec->sme_mask);
         }
 
 	return pud_pte;
@@ -1886,7 +1891,8 @@ x86_64_upgd_offset(struct task_context *tc, ulong uvaddr, int verbose, int IS_XE
 		if (IS_XEN)
 			fprintf(fp, "   PGD: %lx => %lx [machine]\n", (ulong)pgd, pgd_pte);
 		else
-			fprintf(fp, "   PGD: %lx => %lx\n", (ulong)pgd, pgd_pte);
+			fprintf(fp, "   PGD: %lx => %lx\n",
+				(ulong)pgd, pgd_pte & ~machdep->machspec->sme_mask);
         }
 
 	return pgd_pte;
@@ -1904,9 +1910,11 @@ x86_64_p4d_offset(ulong pgd_pte, ulong vaddr, int verbose, int IS_XEN)
 	ulong p4d_pte;
 
 	p4d_paddr = pgd_pte & PHYSICAL_PAGE_MASK;
+	p4d_paddr &= ~machdep->machspec->sme_mask;
 	FILL_P4D(p4d_paddr, PHYSADDR, PAGESIZE());
 	p4d = ((ulong *)p4d_paddr) + p4d_index(vaddr);
 	p4d_pte = ULONG(machdep->machspec->p4d + PAGEOFFSET(p4d));
+	p4d_pte &= ~machdep->machspec->sme_mask;
         if (verbose) {
 		if (IS_XEN)
 			fprintf(fp, "   P4D: %lx => %lx [machine]\n", (ulong)p4d, p4d_pte);
@@ -1929,6 +1937,7 @@ x86_64_pud_offset(ulong pgd_pte, ulong vaddr, int verbose, int IS_XEN)
 	ulong pud_pte;
 
 	pud_paddr = pgd_pte & PHYSICAL_PAGE_MASK;
+	pud_paddr &= ~machdep->machspec->sme_mask;
 
 	if (IS_XEN) {
 		pud_paddr = xen_m2p(pud_paddr);
@@ -1939,6 +1948,7 @@ x86_64_pud_offset(ulong pgd_pte, ulong vaddr, int verbose, int IS_XEN)
 	FILL_PUD(pud_paddr, PHYSADDR, PAGESIZE());
 	pud = ((ulong *)pud_paddr) + pud_index(vaddr);
 	pud_pte = ULONG(machdep->pud + PAGEOFFSET(pud));
+	pud_pte &= ~machdep->machspec->sme_mask;
 	if (verbose) {
 		if (IS_XEN)
 			fprintf(fp, "   PUD: %lx => %lx [machine]\n", (ulong)pud, pud_pte);
@@ -1961,6 +1971,7 @@ x86_64_pmd_offset(ulong pud_pte, ulong vaddr, int verbose, int IS_XEN)
 	ulong pmd_pte;
 
 	pmd_paddr = pud_pte & PHYSICAL_PAGE_MASK;
+	pmd_paddr &= ~machdep->machspec->sme_mask;
 
 	if (IS_XEN) {
 		pmd_paddr = xen_m2p(pmd_paddr);
@@ -1971,6 +1982,7 @@ x86_64_pmd_offset(ulong pud_pte, ulong vaddr, int verbose, int IS_XEN)
 	FILL_PMD(pmd_paddr, PHYSADDR, PAGESIZE());
 	pmd = ((ulong *)pmd_paddr) + pmd_index(vaddr);
 	pmd_pte = ULONG(machdep->pmd + PAGEOFFSET(pmd));
+	pmd_pte &= ~machdep->machspec->sme_mask;
         if (verbose) {
 		if (IS_XEN)
 			fprintf(fp, "   PMD: %lx => %lx [machine]\n", (ulong)pmd, pmd_pte);
@@ -1992,6 +2004,7 @@ x86_64_pte_offset(ulong pmd_pte, ulong vaddr, int verbose, int IS_XEN)
 	ulong pte;
 
 	pte_paddr = pmd_pte & PHYSICAL_PAGE_MASK;
+	pte_paddr &= ~machdep->machspec->sme_mask;
 
 	if (IS_XEN) {
 		pte_paddr = xen_m2p(pte_paddr);
@@ -2002,6 +2015,7 @@ x86_64_pte_offset(ulong pmd_pte, ulong vaddr, int verbose, int IS_XEN)
 	FILL_PTBL(pte_paddr, PHYSADDR, PAGESIZE());
 	ptep = ((ulong *)pte_paddr) + pte_index(vaddr);
 	pte = ULONG(machdep->ptbl + PAGEOFFSET(ptep));
+	pte &= ~machdep->machspec->sme_mask;
 	if (verbose) {
 		if (IS_XEN)
 			fprintf(fp, "   PTE: %lx => %lx [machine]\n", (ulong)ptep, pte);
@@ -4418,8 +4432,7 @@ x86_64_function_called_by(ulong rip)
 	if (gdb_pass_through(buf, pc->tmpfile2, GNU_RETURN_ON_ERROR)) {
 	        rewind(pc->tmpfile2);
 	        while (fgets(buf, BUFSIZE, pc->tmpfile2)) {
-			if ((p1 = strstr(buf, "call")) &&
-			    whitespace(*(p1-1))) { 
+			if ((p1 = strstr(buf, " call")) || (p1 = strstr(buf, "\tcall"))) {
 				if (extract_hex(p1, &value, NULLCHAR, TRUE)) 
 					break;
 			}
@@ -4919,6 +4932,9 @@ x86_64_get_stack_frame(struct bt_info *bt, ulong *pcp, ulong *spp)
 	if (bt->flags & BT_DUMPFILE_SEARCH)
 		return x86_64_get_dumpfile_stack_frame(bt, pcp, spp);
 
+	if (bt->flags & BT_SKIP_IDLE)
+		bt->flags &= ~BT_SKIP_IDLE;
+
         if (pcp)
                 *pcp = x86_64_get_pc(bt);
         if (spp)
@@ -4960,6 +4976,9 @@ x86_64_get_dumpfile_stack_frame(struct bt_info *bt_in, ulong *rip, ulong *rsp)
 	in_nmi_stack = stage = 0;
 	estack = -1;
 	panic = FALSE;
+
+	if (bt_in->flags & BT_SKIP_IDLE)
+		bt_in->flags &= ~BT_SKIP_IDLE;
 
 	panic_task = tt->panic_task == bt->task ? TRUE : FALSE;
 
@@ -5099,6 +5118,8 @@ next_sysrq:
                 if (!panic_task && STREQ(sym, "crash_nmi_callback")) {
                         *rip = *up;
                         *rsp = bt->stackbase + ((char *)(up) - bt->stackbuf);
+			if ((bt->flags & BT_SKIP_IDLE) && is_idle_thread(bt->task))
+				bt_in->flags |= BT_SKIP_IDLE;
                         return;
                 }
 

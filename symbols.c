@@ -7351,7 +7351,7 @@ cmd_p(void)
 	unsigned radix;
 	int do_load_module_filter;
 	char buf1[BUFSIZE]; 
-	char *cpuspec;
+	char *cpuspec, *p;
 
 	do_load_module_filter = radix = 0;
 
@@ -7386,7 +7386,7 @@ cmd_p(void)
         if (argerrs || !args[optind])
                 cmd_usage(pc->curcmd, SYNOPSIS);
 
-	cpuspec = strrchr(args[optind], ':');
+	p = cpuspec = strrchr(args[optind], ':');
 	if (cpuspec)
 		*cpuspec++ = NULLCHAR;
 
@@ -7409,7 +7409,7 @@ cmd_p(void)
 			      sp->name);
 		else
 			/* maybe a valid C expression (e.g. ':') */
-			*(cpuspec-1) = ':';
+			*p = ':';
 	}
 
 	process_gdb_output(concat_args(buf1, 0, TRUE), radix,
@@ -10385,6 +10385,12 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(kset_list));
 	fprintf(fp, "            request_list_count: %ld\n",
 		OFFSET(request_list_count));
+	fprintf(fp, "             request_cmd_flags: %ld\n",
+		OFFSET(request_cmd_flags));
+	fprintf(fp, "                     request_q: %ld\n",
+		OFFSET(request_q));
+	fprintf(fp, "                 request_state: %ld\n",
+		OFFSET(request_state));
 	fprintf(fp, "       request_queue_in_flight: %ld\n",
 		OFFSET(request_queue_in_flight));
 	fprintf(fp, "              request_queue_rq: %ld\n",
@@ -10393,10 +10399,27 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(request_queue_mq_ops));
 	fprintf(fp, "       request_queue_queue_ctx: %ld\n",
 		OFFSET(request_queue_queue_ctx));
+	fprintf(fp, "    request_queue_queue_hw_ctx: %ld\n",
+		OFFSET(request_queue_queue_hw_ctx));
+	fprintf(fp, "    request_queue_nr_hw_queues: %ld\n",
+		OFFSET(request_queue_nr_hw_queues));
+	fprintf(fp, "      request_queue_hctx_table: %ld\n",
+		OFFSET(request_queue_hctx_table));
 	fprintf(fp, "      blk_mq_ctx_rq_dispatched: %ld\n",
 		OFFSET(blk_mq_ctx_rq_dispatched));
 	fprintf(fp, "       blk_mq_ctx_rq_completed: %ld\n",
 		OFFSET(blk_mq_ctx_rq_completed));
+	fprintf(fp, "            blk_mq_hw_ctx_tags: %ld\n",
+		OFFSET(blk_mq_hw_ctx_tags));
+	fprintf(fp, "       blk_mq_tags_bitmap_tags: %ld\n",
+		OFFSET(blk_mq_tags_bitmap_tags));
+	fprintf(fp, "    blk_mq_tags_breserved_tags: %ld\n",
+		OFFSET(blk_mq_tags_breserved_tags));
+	fprintf(fp, "  blk_mq_tags_nr_reserved_tags: %ld\n",
+		OFFSET(blk_mq_tags_nr_reserved_tags));
+	fprintf(fp, "               blk_mq_tags_rqs: %ld\n",
+		OFFSET(blk_mq_tags_rqs));
+
 	fprintf(fp, "  subsys_private_klist_devices: %ld\n",
 		OFFSET(subsys_private_klist_devices));
 	fprintf(fp, "                subsystem_kset: %ld\n",
@@ -10523,6 +10546,10 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "       prb_data_ring_size_bits: %ld\n", OFFSET(prb_data_ring_size_bits));
 	fprintf(fp, "            prb_data_ring_data: %ld\n", OFFSET(prb_data_ring_data));
 	fprintf(fp, "         atomit_long_t_counter: %ld\n", OFFSET(atomic_long_t_counter));
+	fprintf(fp, "       printk_safe_seq_buf_len: %ld\n", OFFSET(printk_safe_seq_buf_len));
+	fprintf(fp, "printk_safe_seq_buf_message_lost: %ld\n",
+		OFFSET(printk_safe_seq_buf_message_lost));
+	fprintf(fp, "    printk_safe_seq_buf_buffer: %ld\n", OFFSET(printk_safe_seq_buf_buffer));
 
 	fprintf(fp, "          sched_rt_entity_my_q: %ld\n",
 		OFFSET(sched_rt_entity_my_q));
@@ -10689,6 +10716,45 @@ dump_offset_table(char *spec, ulong makestruct)
 
 	fprintf(fp, "            uts_namespace_name: %ld\n",
 		OFFSET(uts_namespace_name));
+
+	fprintf(fp, "            sbitmap_word_depth: %ld\n",
+		OFFSET(sbitmap_word_depth));
+	fprintf(fp, "             sbitmap_word_word: %ld\n",
+		OFFSET(sbitmap_word_word));
+	fprintf(fp, "          sbitmap_word_cleared: %ld\n",
+		OFFSET(sbitmap_word_cleared));
+	fprintf(fp, "                 sbitmap_depth: %ld\n",
+		OFFSET(sbitmap_depth));
+	fprintf(fp, "                 sbitmap_shift: %ld\n",
+		OFFSET(sbitmap_shift));
+	fprintf(fp, "                sbitmap_map_nr: %ld\n",
+		OFFSET(sbitmap_map_nr));
+	fprintf(fp, "                   sbitmap_map: %ld\n",
+		OFFSET(sbitmap_map));
+	fprintf(fp, "            sbitmap_alloc_hint: %ld\n",
+		OFFSET(sbitmap_alloc_hint));
+	fprintf(fp, "           sbitmap_round_robin: %ld\n",
+		OFFSET(sbitmap_round_robin));
+	fprintf(fp, "              sbitmap_queue_sb: %ld\n",
+		OFFSET(sbitmap_queue_sb));
+	fprintf(fp, "      sbitmap_queue_alloc_hint: %ld\n",
+		OFFSET(sbitmap_queue_alloc_hint));
+	fprintf(fp, "      sbitmap_queue_wake_batch: %ld\n",
+		OFFSET(sbitmap_queue_wake_batch));
+	fprintf(fp, "      sbitmap_queue_wake_index: %ld\n",
+		OFFSET(sbitmap_queue_wake_index));
+	fprintf(fp, "              sbitmap_queue_ws: %ld\n",
+		OFFSET(sbitmap_queue_ws));
+	fprintf(fp, "       sbitmap_queue_ws_active: %ld\n",
+		OFFSET(sbitmap_queue_ws_active));
+	fprintf(fp, "     sbitmap_queue_round_robin: %ld\n",
+		OFFSET(sbitmap_queue_round_robin));
+	fprintf(fp, "sbitmap_queue_min_shallow_depth: %ld\n",
+		OFFSET(sbitmap_queue_min_shallow_depth));
+	fprintf(fp, "       sbq_wait_state_wait_cnt: %ld\n",
+		OFFSET(sbq_wait_state_wait_cnt));
+	fprintf(fp, "           sbq_wait_state_wait: %ld\n",
+		OFFSET(sbq_wait_state_wait));
 
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
@@ -10954,7 +11020,13 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                   printk_info: %ld\n", SIZE(printk_info));
 	fprintf(fp, "             printk_ringbuffer: %ld\n", SIZE(printk_ringbuffer));
 	fprintf(fp, "                      prb_desc: %ld\n", SIZE(prb_desc));
+	fprintf(fp, "    printk_safe_seq_buf_buffer: %ld\n", SIZE(printk_safe_seq_buf_buffer));
 
+	fprintf(fp, "                  sbitmap_word: %ld\n", SIZE(sbitmap_word));
+	fprintf(fp, "                       sbitmap: %ld\n", SIZE(sbitmap));
+	fprintf(fp, "                 sbitmap_queue: %ld\n", SIZE(sbitmap_queue));
+	fprintf(fp, "                sbq_wait_state: %ld\n", SIZE(sbq_wait_state));
+	fprintf(fp, "                   blk_mq_tags: %ld\n", SIZE(blk_mq_tags));
 
         fprintf(fp, "\n                   array_table:\n");
 	/*

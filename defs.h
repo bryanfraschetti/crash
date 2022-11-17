@@ -18,6 +18,7 @@
 
 #ifndef GDB_COMMON
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -135,7 +136,7 @@
 #define NR_CPUS  (4096)
 #endif
 #ifdef PPC64
-#define NR_CPUS  (2048)
+#define NR_CPUS  (8192)
 #endif
 #ifdef S390
 #define NR_CPUS  (512)
@@ -829,6 +830,7 @@ struct task_context {                     /* context stored for each task */
 struct tgid_context {               /* tgid and task stored for each task */
 	ulong tgid;
 	ulong task;
+	long rss_cache;
 };
 
 struct task_table {                      /* kernel/local task table data */
@@ -1013,7 +1015,6 @@ struct machdep_table {
         ulong (*processor_speed)(void);
         int (*uvtop)(struct task_context *, ulong, physaddr_t *, int);
         int (*kvtop)(struct task_context *, ulong, physaddr_t *, int);
-	int (*get_cpu_reg)(int, int, const char *, int, void *);
         ulong (*get_task_pgd)(ulong);
 	void (*dump_irq)(int);
 	void (*get_stack_frame)(struct bt_info *, ulong *, ulong *);
@@ -1063,6 +1064,7 @@ struct machdep_table {
         void (*get_irq_affinity)(int);
         void (*show_interrupts)(int, ulong *);
 	int (*is_page_ptr)(ulong, physaddr_t *);
+	int (*get_cpu_reg)(int, int, const char *, int, void *);
 };
 
 /*
@@ -2146,6 +2148,39 @@ struct offset_table {                    /* stash of commonly-used offsets */
 	long wait_queue_entry_private;
 	long wait_queue_head_head;
 	long wait_queue_entry_entry;
+	long printk_safe_seq_buf_len;
+	long printk_safe_seq_buf_message_lost;
+	long printk_safe_seq_buf_buffer;
+	long sbitmap_word_depth;
+	long sbitmap_word_word;
+	long sbitmap_word_cleared;
+	long sbitmap_depth;
+	long sbitmap_shift;
+	long sbitmap_map_nr;
+	long sbitmap_map;
+	long sbitmap_queue_sb;
+	long sbitmap_queue_alloc_hint;
+	long sbitmap_queue_wake_batch;
+	long sbitmap_queue_wake_index;
+	long sbitmap_queue_ws;
+	long sbitmap_queue_ws_active;
+	long sbitmap_queue_round_robin;
+	long sbitmap_queue_min_shallow_depth;
+	long sbq_wait_state_wait_cnt;
+	long sbq_wait_state_wait;
+	long sbitmap_alloc_hint;
+	long sbitmap_round_robin;
+	long request_cmd_flags;
+	long request_q;
+	long request_state;
+	long request_queue_queue_hw_ctx;
+	long request_queue_nr_hw_queues;
+	long blk_mq_hw_ctx_tags;
+	long blk_mq_tags_bitmap_tags;
+	long blk_mq_tags_breserved_tags;
+	long blk_mq_tags_nr_reserved_tags;
+	long blk_mq_tags_rqs;
+	long request_queue_hctx_table;
 };
 
 struct size_table {         /* stash of commonly-used sizes */
@@ -2310,6 +2345,12 @@ struct size_table {         /* stash of commonly-used sizes */
 	long prb_desc;
 	long wait_queue_entry;
 	long task_struct_state;
+	long printk_safe_seq_buf_buffer;
+	long sbitmap_word;
+	long sbitmap;
+	long sbitmap_queue;
+	long sbq_wait_state;
+	long blk_mq_tags;
 };
 
 struct array_table {
@@ -2436,6 +2477,7 @@ DEF_LOADER(ushort);
 DEF_LOADER(short);
 typedef void *pointer_t;
 DEF_LOADER(pointer_t);
+DEF_LOADER(bool);
 
 #define LOADER(TYPE) load_##TYPE
 
@@ -2449,6 +2491,7 @@ DEF_LOADER(pointer_t);
 #define SHORT(ADDR)     LOADER(short) ((char *)(ADDR))
 #define UCHAR(ADDR)     *((unsigned char *)((char *)(ADDR)))
 #define VOID_PTR(ADDR)  ((void *) (LOADER(pointer_t) ((char *)(ADDR))))
+#define BOOL(ADDR)      LOADER(bool) ((char *)(ADDR)))
 
 #else
 
@@ -2462,6 +2505,7 @@ DEF_LOADER(pointer_t);
 #define SHORT(ADDR)     *((short *)((char *)(ADDR)))
 #define UCHAR(ADDR)     *((unsigned char *)((char *)(ADDR)))
 #define VOID_PTR(ADDR)  *((void **)((char *)(ADDR)))
+#define BOOL(ADDR)      *((bool *)((char *)(ADDR)))
 
 #endif /* NEED_ALIGNED_MEM_ACCESS */
 
@@ -2753,7 +2797,6 @@ struct symbol_table_data {
         double val_hash_searches;
         double val_hash_iterations;
         struct syment *symname_hash[SYMNAME_HASH];
-	struct syment *mod_symname_hash[SYMNAME_HASH];
 	struct symbol_namespace kernel_namespace;
 	struct syment *ext_module_symtable;
 	struct syment *ext_module_symend;
@@ -2780,6 +2823,7 @@ struct symbol_table_data {
 	ulong kaiser_init_vmlinux;
 	int kernel_symbol_type;
 	ulong linux_banner_vmlinux;
+	struct syment *mod_symname_hash[SYMNAME_HASH];
 };
 
 /* flags for st */
@@ -3218,6 +3262,7 @@ typedef signed int s32;
 #define UNW_4_14      (0x200)
 #define FLIPPED_VM    (0x400)
 #define HAS_PHYSVIRT_OFFSET (0x800)
+#define OVERFLOW_STACKS     (0x1000)
 
 /*
  * Get kimage_voffset from /dev/crash
@@ -3260,6 +3305,7 @@ typedef signed int s32;
 
 #define ARM64_STACK_SIZE   (16384)
 #define ARM64_IRQ_STACK_SIZE   ARM64_STACK_SIZE
+#define ARM64_OVERFLOW_STACK_SIZE   (4096)
 
 #define _SECTION_SIZE_BITS           30
 #define _SECTION_SIZE_BITS_5_12      27
@@ -3332,6 +3378,9 @@ struct machine_specific {
 	char  *irq_stackbuf;
 	ulong __irqentry_text_start;
 	ulong __irqentry_text_end;
+	ulong overflow_stack_size;
+	ulong *overflow_stacks;
+	char  *overflow_stackbuf;
 	/* for exception vector code */
 	ulong exp_entry1_start;
 	ulong exp_entry1_end;
@@ -3351,6 +3400,7 @@ struct machine_specific {
 	ulong VA_START;
 	ulong CONFIG_ARM64_KERNELPACMASK;
 	ulong physvirt_offset;
+	ulong struct_page_size;
 };
 
 struct arm64_stackframe {
@@ -4495,6 +4545,26 @@ struct machine_specific {
 #define NUM_IN_BITMAP(bitmap, x) (bitmap[(x)/BITS_PER_LONG] & NUM_TO_BIT(x))
 #define SET_BIT(bitmap, x) (bitmap[(x)/BITS_PER_LONG] |= NUM_TO_BIT(x))
 
+static inline unsigned int __const_hweight8(unsigned long w)
+{
+	return
+		(!!((w) & (1ULL << 0))) +
+		(!!((w) & (1ULL << 1))) +
+		(!!((w) & (1ULL << 2))) +
+		(!!((w) & (1ULL << 3))) +
+		(!!((w) & (1ULL << 4))) +
+		(!!((w) & (1ULL << 5))) +
+		(!!((w) & (1ULL << 6))) +
+		(!!((w) & (1ULL << 7)));
+}
+
+#define __const_hweight16(w) (__const_hweight8(w)  + __const_hweight8((w)  >> 8))
+#define __const_hweight32(w) (__const_hweight16(w) + __const_hweight16((w) >> 16))
+#define __const_hweight64(w) (__const_hweight32(w) + __const_hweight32((w) >> 32))
+
+#define hweight32(w) __const_hweight32(w)
+#define hweight64(w) __const_hweight64(w)
+
 /*
  *  precision lengths for fprintf
  */ 
@@ -4804,6 +4874,7 @@ extern "C" int patch_kernel_symbol(struct gnu_request *);
 struct syment *symbol_search(char *);
 int gdb_line_number_callback(ulong, ulong, ulong);
 int gdb_print_callback(ulong);
+char *gdb_lookup_module_symbol(ulong, ulong *);
 extern "C" int same_file(char *, char *);
 #endif
 
@@ -4957,6 +5028,7 @@ void cmd_mach(void);         /* main.c */
 void cmd_help(void);         /* help.c */
 void cmd_test(void);         /* test.c */
 void cmd_ascii(void);        /* tools.c */
+void cmd_sbitmapq(void);     /* sbitmap.c */
 void cmd_bpf(void);          /* bfp.c */
 void cmd_set(void);          /* tools.c */
 void cmd_eval(void);         /* tools.c */
@@ -5570,6 +5642,7 @@ extern char *help_rd[];
 extern char *help_repeat[];
 extern char *help_runq[];
 extern char *help_ipcs[];
+extern char *help_sbitmapq[];
 extern char *help_search[];
 extern char *help_set[];
 extern char *help_sig[];
@@ -5694,6 +5767,7 @@ void dump_log(int);
 #define SHOW_LOG_TEXT  (0x4)
 #define SHOW_LOG_AUDIT (0x8)
 #define SHOW_LOG_CTIME (0x10)
+#define SHOW_LOG_SAFE  (0x20)
 void set_cpu(int);
 void clear_machdep_cache(void);
 struct stack_hook *gather_text_list(struct bt_info *);
@@ -5770,6 +5844,8 @@ ulong cpu_map_addr(const char *type);
 #define BT_CPUMASK        (0x1000000000000ULL)
 #define BT_SHOW_ALL_REGS  (0x2000000000000ULL)
 #define BT_REGS_NOT_FOUND (0x4000000000000ULL)
+#define BT_OVERFLOW_STACK (0x8000000000000ULL)
+#define BT_SKIP_IDLE     (0x10000000000000ULL)
 #define BT_SYMBOL_OFFSET   (BT_SYMBOLIC_ARGS)
 
 #define BT_REF_HEXVAL         (0x1)
@@ -5837,6 +5913,40 @@ void devdump_info(void *, ulonglong, FILE *);
  */
 void ipcs_init(void);
 ulong idr_find(ulong, int);
+
+/*
+ * sbitmap.c
+ */
+/* sbitmap helpers */
+struct sbitmap_context {
+	unsigned depth;
+	unsigned shift;
+	unsigned map_nr;
+	ulong map_addr;
+	ulong alloc_hint;
+	bool round_robin;
+};
+
+typedef bool (*sbitmap_for_each_fn)(unsigned int idx, void *p);
+
+void sbitmap_for_each_set(const struct sbitmap_context *sc,
+	sbitmap_for_each_fn fn, void *data);
+void sbitmap_context_load(ulong addr, struct sbitmap_context *sc);
+
+/* sbitmap_queue helpers */
+typedef bool (*sbitmapq_for_each_fn)(unsigned int idx, ulong addr, void *p);
+
+struct sbitmapq_ops {
+	/* array params associated with the bitmap */
+	ulong addr;
+	ulong size;
+	/* callback params */
+	sbitmapq_for_each_fn fn;
+	void *p;
+};
+
+void sbitmapq_init(void);
+void sbitmapq_for_each_set(ulong addr, struct sbitmapq_ops *ops);
 
 #ifdef ARM
 void arm_init(int);
@@ -6089,6 +6199,7 @@ struct machine_specific {
 	ulong cpu_entry_area_end;
 	ulong page_offset_force;
 	char **exception_functions;
+	ulong sme_mask;
 };
 
 #define KSYMS_START    (0x1)
@@ -6179,6 +6290,13 @@ struct ppc64_elf_prstatus {
 
 #ifdef PPC64
 
+enum emergency_stack_type {
+	NONE_STACK		= 0,
+	EMERGENCY_STACK,
+	NMI_EMERGENCY_STACK,
+	MC_EMERGENCY_STACK
+};
+
 struct ppc64_opal {
 	uint64_t base;
 	uint64_t entry;
@@ -6194,9 +6312,14 @@ struct ppc64_vmemmap {
  * Used to store the HW interrupt stack. It is only for 2.4.
  */
 struct machine_specific {
-        ulong hwintrstack[NR_CPUS];
+	ulong *hwintrstack;
         char *hwstackbuf;
         uint hwstacksize;
+
+	/* Emergency stacks */
+	ulong *emergency_sp;
+	ulong *nmi_emergency_sp;
+	ulong *mc_emergency_sp;
 
 	uint l4_index_size;
 	uint l3_index_size;
@@ -7162,6 +7285,7 @@ int gdb_pass_through(char *, FILE *, ulong);
 int gdb_readmem_callback(ulong, void *, int, int);
 int gdb_line_number_callback(ulong, ulong, ulong);
 int gdb_print_callback(ulong);
+char *gdb_lookup_module_symbol(ulong, ulong *);
 void gdb_error_hook(void);
 void restore_gdb_sanity(void);
 int is_gdb_command(int, ulong);

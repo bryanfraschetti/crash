@@ -23,6 +23,11 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include "xendump.h"
+#if defined(GDB_7_6) || defined(GDB_10_2)
+#define __CONFIG_H__ 1
+#include "config.h"
+#endif
+#include "bfd.h"
 
 static void do_module_cmd(ulong, char *, ulong, char *, char *);
 static void show_module_taint(void);
@@ -93,9 +98,11 @@ static void source_tree_init(void);
 static ulong dump_audit_skb_queue(ulong);
 static ulong __dump_audit(char *);
 static void dump_audit(void);
+static void dump_printk_safe_seq_buf(int);
 static char *vmcoreinfo_read_string(const char *);
 static void check_vmcoreinfo(void);
 static int is_pvops_xen(void);
+static int get_linux_banner_from_vmlinux(char *, size_t);
 
 
 /*
@@ -1053,7 +1060,7 @@ verify_version(void)
 	if (!(sp = symbol_search("linux_banner")))
 		error(FATAL, "linux_banner symbol does not exist?\n");
 	else if ((sp->type == 'R') || (sp->type == 'r') ||
-		(THIS_KERNEL_VERSION >= LINUX(2,6,11) && sp->type == 'D') ||
+		(THIS_KERNEL_VERSION >= LINUX(2,6,11) && (sp->type == 'D' || sp->type == 'd')) ||
 		 (machine_type("ARM") && sp->type == 'T') ||
 		 (machine_type("ARM64")))
 		linux_banner = symbol_value("linux_banner");
@@ -1323,6 +1330,12 @@ verify_namelist()
 	target_smp = strstr(kt->utsname.version, " SMP ") ? TRUE : FALSE;
 	namelist_smp = FALSE;
 
+	if (get_linux_banner_from_vmlinux(buffer, sizeof(buffer)) &&
+	    strstr(buffer, kt->proc_version)) {
+		found = TRUE;
+		goto found;
+	}
+
         sprintf(command, "/usr/bin/strings %s", namelist);
         if ((pipe = popen(command, "r")) == NULL) {
                 error(INFO, "%s: %s\n", namelist, strerror(errno));
@@ -1383,6 +1396,7 @@ verify_namelist()
 		}
 	}
 
+found:
 	if (found) {
                 if (CRASHDEBUG(1)) {
                 	fprintf(fp, "verify_namelist:\n");
@@ -2489,7 +2503,7 @@ cmd_bt(void)
 	if (kt->flags & USE_OPT_BT)
 		bt->flags |= BT_OPT_BACK_TRACE;
 
-	while ((c = getopt(argcnt, args, "D:fFI:S:c:aAloreEgstTdxR:Ovp")) != EOF) {
+	while ((c = getopt(argcnt, args, "D:fFI:S:c:n:aAloreEgstTdxR:Ovp")) != EOF) {
                 switch (c)
 		{
 		case 'f':
@@ -2656,6 +2670,14 @@ cmd_bt(void)
 			bt->flags |= BT_SHOW_ALL_REGS; /* FALLTHROUGH */
 		case 'a':
 			active++;
+			break;
+
+		case 'n':
+			if ((machine_type("X86_64") || machine_type("ARM64")) &&
+			    STREQ(optarg, "idle"))
+				bt->flags |= BT_SKIP_IDLE;
+			else
+				option_not_supported(c);
 			break;
 
 		case 'r':
@@ -3077,6 +3099,10 @@ back_trace(struct bt_info *bt)
 			machdep->get_stack_frame(bt, &eip, &esp);
 	} else
                 machdep->get_stack_frame(bt, &eip, &esp);
+
+	/* skip idle task stack */
+	if (bt->flags & BT_SKIP_IDLE)
+		return;
 
 	if (bt->flags & BT_KSTACKP) {
 		bt->stkptr = esp;
@@ -4998,7 +5024,7 @@ cmd_log(void)
 
 	msg_flags = 0;
 
-        while ((c = getopt(argcnt, args, "Ttdma")) != EOF) {
+        while ((c = getopt(argcnt, args, "Ttdmas")) != EOF) {
                 switch(c)
                 {
 		case 'T':
@@ -5016,6 +5042,9 @@ cmd_log(void)
 		case 'a':
 			msg_flags |= SHOW_LOG_AUDIT;
 			break;
+		case 's':
+			msg_flags |= SHOW_LOG_SAFE;
+			break;
                 default:
                         argerrs++;
                         break;
@@ -5025,21 +5054,9 @@ cmd_log(void)
         if (argerrs)
                 cmd_usage(pc->curcmd, SYNOPSIS);
 
-	if (msg_flags & SHOW_LOG_CTIME) {
-		if (pc->flags & MINIMAL_MODE) {
-			error(WARNING, "the option '-T' is not available in minimal mode\n");
-			return;
-		}
-
-		if (kt->boot_date.tv_sec == 0) {
-			ulonglong uptime_jiffies;
-			ulong  uptime_sec;
-
-			get_uptime(NULL, &uptime_jiffies);
-			uptime_sec = (uptime_jiffies)/(ulonglong)machdep->hz;
-			kt->boot_date.tv_sec = kt->date.tv_sec - uptime_sec;
-			kt->boot_date.tv_nsec = 0;
-		}
+	if (msg_flags & SHOW_LOG_CTIME && pc->flags & MINIMAL_MODE) {
+		error(WARNING, "the option '-T' is not available in minimal mode\n");
+		return;
 	}
 
 	if (msg_flags & SHOW_LOG_AUDIT) {
@@ -5047,7 +5064,13 @@ cmd_log(void)
 		return;
 	}
 
+	if (msg_flags & SHOW_LOG_SAFE) {
+		dump_printk_safe_seq_buf(msg_flags);
+		return;
+	}
+
 	dump_log(msg_flags);
+	dump_printk_safe_seq_buf(msg_flags);
 }
 
 
@@ -5478,7 +5501,7 @@ cmd_sys(void)
 		else if (STREQ(args[optind], "config"))
 			read_in_kernel_config(IKCFG_READ);
                 else
-                        cmd_usage(args[optind], COMPLETE_HELP);
+                        cmd_usage(pc->curcmd, SYNOPSIS);
                 optind++;
         } while (args[optind]);
 }
@@ -7675,7 +7698,8 @@ dump_hrtimer_data(const ulong *cpus)
 	if (VALID_STRUCT(hrtimer_clock_base)) {
 		hrtimer_max_clock_bases = 2;
 		if (symbol_exists("ktime_get_boottime"))
-			hrtimer_max_clock_bases = 3;
+			hrtimer_max_clock_bases = MEMBER_SIZE("hrtimer_cpu_base", "clock_base") /
+							SIZE(hrtimer_clock_base);
 	} else if (VALID_STRUCT(hrtimer_base)) {
 		max_hrtimer_bases = 2;
 	} else
@@ -10757,11 +10781,21 @@ is_pvops_xen(void)
 	     STREQ(sym, "paravirt_patch_default")))
 		return TRUE;
 
-	if (symbol_exists("xen_start_info") &&
-	    readmem(symbol_value("xen_start_info"), KVADDR, &addr,
-	    sizeof(void *), "xen_start_info", RETURN_ON_ERROR) &&
-	    addr != 0)
-		return TRUE;
+	if (machine_type("X86") || machine_type("X86_64")) {
+		if (symbol_exists("xen_start_info") &&
+		    readmem(symbol_value("xen_start_info"), KVADDR, &addr,
+		    sizeof(void *), "xen_start_info", RETURN_ON_ERROR) &&
+		    addr != 0)
+			return TRUE;
+	}
+
+	if (machine_type("ARM") || machine_type("ARM64")) {
+		if (symbol_exists("xen_vcpu_info") &&
+		    readmem(symbol_value("xen_vcpu_info"), KVADDR, &addr,
+		    sizeof(void *), "xen_vcpu_info", RETURN_ON_ERROR) &&
+		    addr != 0)
+			return TRUE;
+	}
 
 	return FALSE;
 }
@@ -11534,6 +11568,153 @@ dump_audit(void)
 		error(INFO, "kernel audit log is empty\n");
 }
 
+#define PRINTK_SAFE_SEQ_BUF_INDENT 2
+
+static void
+__dump_printk_safe_seq_buf(char *buf_name, int msg_flags)
+{
+	int cpu, buffer_size;
+	char *buffer;
+	ulong base_addr, len_addr, message_lost_addr, buffer_addr;
+	bool show_header;
+
+	show_header = msg_flags & SHOW_LOG_SAFE;
+
+	if (!symbol_exists(buf_name)) {
+		return;
+	}
+
+	base_addr = symbol_value(buf_name);
+	len_addr = base_addr + OFFSET(printk_safe_seq_buf_len)
+			+ OFFSET(atomic_t_counter);
+	message_lost_addr = base_addr
+			+ OFFSET(printk_safe_seq_buf_message_lost)
+			+ OFFSET(atomic_t_counter);
+	buffer_addr = base_addr + OFFSET(printk_safe_seq_buf_buffer);
+	buffer_size = SIZE(printk_safe_seq_buf_buffer);
+	buffer = GETBUF(buffer_size);
+
+	if (show_header)
+		fprintf(fp, "PRINTK_SAFE_SEQ_BUF: %s\n", buf_name);
+	for (cpu = 0; cpu < kt->cpus; cpu++) {
+		int len, message_lost;
+		ulong per_cpu_offset;
+		per_cpu_offset = kt->__per_cpu_offset[cpu];
+
+		readmem(len_addr + per_cpu_offset, KVADDR, &len, sizeof(int),
+			"printk_safe_seq_buf len", FAULT_ON_ERROR);
+
+		if (show_header) {
+			readmem(message_lost_addr + per_cpu_offset, KVADDR,
+				&message_lost, sizeof(int),
+				"printk_safe_seq_buf message_lost", FAULT_ON_ERROR);
+			fprintf(fp, "CPU: %d  ADDR: %lx LEN: %d  MESSAGE_LOST: %d\n",
+				cpu, base_addr + per_cpu_offset, len, message_lost);
+		}
+
+		if (len > 0) {
+			int i, n, ilen;
+			char *p;
+			bool start_of_line;
+
+			ilen = 0;
+			if (show_header) {
+				ilen = PRINTK_SAFE_SEQ_BUF_INDENT;
+			} else {
+				if (msg_flags & SHOW_LOG_TEXT)
+					ilen = 0;
+				else
+					ilen = strlen(buf_name) + 3; // "[%s] "
+			}
+			if (msg_flags & SHOW_LOG_LEVEL)
+				ilen += 3; // "<%c>"
+
+			readmem(buffer_addr + per_cpu_offset, KVADDR,
+				buffer, buffer_size,
+				"printk_safe_seq_buf buffer", FAULT_ON_ERROR);
+
+			start_of_line = true;
+			n = (len <= buffer_size) ? len : buffer_size;
+			for (i = 0, p = buffer; i < n; i++, p++) {
+				bool sol = start_of_line;
+				start_of_line = false;
+				if (*p == 0x1) { //SOH
+					i++; p++;
+
+					if (!sol)
+						fprintf(fp, "\n");
+
+					if (show_header)
+						fprintf(fp, "%s", space(PRINTK_SAFE_SEQ_BUF_INDENT));
+					else if (!(msg_flags & SHOW_LOG_TEXT))
+						fprintf(fp, "[%s] ", buf_name);
+
+					if ((msg_flags & SHOW_LOG_LEVEL) && (i < n)) {
+						switch (*p) {
+						case '0' ... '7':
+						case 'c':
+							fprintf(fp, "<%c>", *p);
+						}
+					}
+
+					continue;
+				} else {
+					if (sol)
+						fprintf(fp, "%s", space(ilen));
+
+					if (isprint(*p) || isspace(*p)) {
+						fputc(*p, fp);
+						if (*p == '\n')
+							start_of_line = true;
+					} else {
+						fputc('.', fp);
+					}
+				}
+			}
+			if (!start_of_line)
+				fputc('\n', fp);
+			if (show_header)
+				fputc('\n', fp);
+		} else if (show_header) {
+			fprintf(fp, "%s(empty)\n\n", space(PRINTK_SAFE_SEQ_BUF_INDENT));
+		}
+	}
+	FREEBUF(buffer);
+}
+
+static void
+dump_printk_safe_seq_buf(int msg_flags)
+{
+	if (!STRUCT_EXISTS("printk_safe_seq_buf"))
+		return;
+
+	if (INVALID_SIZE(printk_safe_seq_buf_buffer)) {
+		MEMBER_OFFSET_INIT(printk_safe_seq_buf_len,
+			"printk_safe_seq_buf", "len");
+		MEMBER_OFFSET_INIT(printk_safe_seq_buf_message_lost,
+			"printk_safe_seq_buf", "message_lost");
+		MEMBER_OFFSET_INIT(printk_safe_seq_buf_buffer,
+			"printk_safe_seq_buf", "buffer");
+
+		if (!INVALID_MEMBER(printk_safe_seq_buf_buffer)) {
+			MEMBER_SIZE_INIT(printk_safe_seq_buf_buffer,
+				"printk_safe_seq_buf", "buffer");
+		}
+	}
+
+	if (INVALID_MEMBER(printk_safe_seq_buf_len) ||
+	    INVALID_MEMBER(printk_safe_seq_buf_message_lost) ||
+	    INVALID_MEMBER(printk_safe_seq_buf_buffer) ||
+	    INVALID_SIZE(printk_safe_seq_buf_buffer)) {
+		if (msg_flags & SHOW_LOG_SAFE)
+			error(INFO, "-s not supported with this kernel version\n");
+		return;
+	}
+
+	__dump_printk_safe_seq_buf("nmi_print_seq", msg_flags);
+	__dump_printk_safe_seq_buf("safe_print_seq", msg_flags);
+}
+
 /*
  * Reads a string value from the VMCOREINFO data stored in (live) memory.
  *
@@ -11613,4 +11794,35 @@ check_vmcoreinfo(void)
 			break;
 		}
 	}
+}
+
+static
+int get_linux_banner_from_vmlinux(char *buf, size_t size)
+{
+	struct bfd_section *sect;
+	long offset;
+
+	if (!kernel_symbol_exists(".rodata"))
+		return FALSE;
+
+	sect = bfd_get_section_by_name(st->bfd, ".rodata");
+	if (!sect)
+		return FALSE;
+
+	/*
+	 * Although symbol_value() returns dynamic symbol value that
+	 * is affected by kaslr, which is different from static symbol
+	 * value in vmlinux file, but relative offset to linux_banner
+	 * object in .rodata section is idential.
+	 */
+	offset = symbol_value("linux_banner") - symbol_value(".rodata");
+
+	if (!bfd_get_section_contents(st->bfd,
+				      sect,
+				      buf,
+				      offset,
+				      size))
+		return FALSE;
+
+	return TRUE;
 }

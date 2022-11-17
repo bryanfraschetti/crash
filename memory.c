@@ -421,6 +421,8 @@ vm_init(void)
 		MEMBER_OFFSET_INIT(page_prev, "page", "prev");
 	if (INVALID_MEMBER(page_next))
 		ANON_MEMBER_OFFSET_INIT(page_next, "page", "next");
+	if (INVALID_MEMBER(page_next))
+		MEMBER_OFFSET_INIT(page_next, "slab", "next");
 
 	MEMBER_OFFSET_INIT(page_list, "page", "list");
 	if (VALID_MEMBER(page_list)) {
@@ -539,6 +541,15 @@ vm_init(void)
 		ANON_MEMBER_OFFSET_INIT(page_s_mem, "page", "s_mem");
 		ANON_MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
 		ANON_MEMBER_OFFSET_INIT(page_active, "page", "active");
+		/*
+		 * Moved to struct slab in Linux 5.17
+		 */
+		if (INVALID_MEMBER(page_s_mem))
+			MEMBER_OFFSET_INIT(page_s_mem, "slab", "s_mem");
+		if (INVALID_MEMBER(page_freelist))
+			MEMBER_OFFSET_INIT(page_freelist, "slab", "freelist");
+		if (INVALID_MEMBER(page_active))
+			MEMBER_OFFSET_INIT(page_active, "slab", "active");
 	}
 
         if (!VALID_STRUCT(kmem_slab_s) && VALID_STRUCT(slab_s)) {
@@ -576,7 +587,8 @@ vm_init(void)
 		STRUCT_SIZE_INIT(cpucache_s, "cpucache_s");
 
         } else if (!VALID_STRUCT(kmem_slab_s) && 
-		   !VALID_STRUCT(slab_s) && 
+		   !VALID_STRUCT(slab_s) &&
+		   !MEMBER_EXISTS("kmem_cache", "cpu_slab") &&
 		   (VALID_STRUCT(slab) || (vt->flags & SLAB_OVERLOAD_PAGE))) {
                 vt->flags |= PERCPU_KMALLOC_V2;
 
@@ -746,11 +758,15 @@ vm_init(void)
 		MEMBER_OFFSET_INIT(kmem_cache_random, "kmem_cache", "random");
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_freelist, "kmem_cache_cpu", "freelist");
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_page, "kmem_cache_cpu", "page");
+		if (INVALID_MEMBER(kmem_cache_cpu_page))
+			MEMBER_OFFSET_INIT(kmem_cache_cpu_page, "kmem_cache_cpu", "slab");
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_node, "kmem_cache_cpu", "node");
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_partial, "kmem_cache_cpu", "partial");
 		MEMBER_OFFSET_INIT(page_inuse, "page", "inuse");
 		if (INVALID_MEMBER(page_inuse))
 			ANON_MEMBER_OFFSET_INIT(page_inuse, "page", "inuse");
+		if (INVALID_MEMBER(page_inuse))
+			MEMBER_OFFSET_INIT(page_inuse, "slab", "inuse");
 		MEMBER_OFFSET_INIT(page_offset, "page", "offset");
 		if (INVALID_MEMBER(page_offset))
 			ANON_MEMBER_OFFSET_INIT(page_offset, "page", "offset");
@@ -762,6 +778,9 @@ vm_init(void)
 			if (INVALID_MEMBER(page_slab))
 				ANON_MEMBER_OFFSET_INIT(page_slab, "page", "slab_cache");
 		}
+		if (INVALID_MEMBER(page_slab))
+			MEMBER_OFFSET_INIT(page_slab, "slab", "slab_cache");
+
 		MEMBER_OFFSET_INIT(page_slab_page, "page", "slab_page");
 		if (INVALID_MEMBER(page_slab_page))
 			ANON_MEMBER_OFFSET_INIT(page_slab_page, "page", "slab_page");
@@ -771,10 +790,14 @@ vm_init(void)
 		MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
 		if (INVALID_MEMBER(page_freelist))
 			ANON_MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
+		if (INVALID_MEMBER(page_freelist))
+			MEMBER_OFFSET_INIT(page_freelist, "slab", "freelist");
 		if (INVALID_MEMBER(kmem_cache_objects)) {
 			MEMBER_OFFSET_INIT(kmem_cache_oo, "kmem_cache", "oo");
 			/* NOTE: returns offset of containing bitfield */
 			ANON_MEMBER_OFFSET_INIT(page_objects, "page", "objects");
+			if (INVALID_MEMBER(page_objects))
+				ANON_MEMBER_OFFSET_INIT(page_objects, "slab", "objects");
 		}
 		if (VALID_MEMBER(kmem_cache_node)) {
                 	ARRAY_LENGTH_INIT(len, NULL, "kmem_cache.node", NULL, 0);
@@ -4664,7 +4687,7 @@ void
 get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 {
 	struct task_context *tc;
-	long rss = 0;
+	long rss = 0, rss_cache = 0;
 
 	BZERO(tm, sizeof(struct task_mem_usage));
 
@@ -4691,18 +4714,29 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 		 *  Latest kernels have mm_struct.mm_rss_stat[].
 		 */ 
 		if (VALID_MEMBER(mm_struct_rss_stat)) {
-			long anonpages, filepages;
+			long anonpages, filepages, count;
 
 			anonpages = tt->anonpages;
 			filepages = tt->filepages;
-			rss += LONG(tt->mm_struct +
+			count = LONG(tt->mm_struct +
 				OFFSET(mm_struct_rss_stat) +
 				OFFSET(mm_rss_stat_count) +
 				(filepages * sizeof(long)));
-			rss += LONG(tt->mm_struct +
+
+			/*
+			 * The counter is updated in asynchronous manner
+			 * and may become negative, see:
+			 * include/linux/mm.h: get_mm_counter()
+			 */
+			if (count > 0)
+				rss += count;
+
+			count = LONG(tt->mm_struct +
 				OFFSET(mm_struct_rss_stat) +
 				OFFSET(mm_rss_stat_count) +
 				(anonpages * sizeof(long)));
+			if (count > 0)
+				rss += count;
 		}
 
 		/* Check whether SPLIT_RSS_COUNTING is enabled */
@@ -4729,38 +4763,48 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 					(last->tgid == (last + 1)->tgid))
 					last++;
 
-				while (first <= last)
-				{
-					/* count 0 -> filepages */
-					if (!readmem(first->task +
-						OFFSET(task_struct_rss_stat) +
-						OFFSET(task_rss_stat_count), KVADDR,
-						&sync_rss,
-						sizeof(int),
-						"task_struct rss_stat MM_FILEPAGES",
-						RETURN_ON_ERROR))
-							continue;
+				/*
+				 * Using rss cache for dumpfile is more beneficial than live debug
+				 * because its value never changes in dumpfile.
+				 */
+				if (ACTIVE() || last->rss_cache == UNINITIALIZED) {
+					while (first <= last)
+					{
+						/* count 0 -> filepages */
+						if (!readmem(first->task +
+							OFFSET(task_struct_rss_stat) +
+							OFFSET(task_rss_stat_count), KVADDR,
+							&sync_rss,
+							sizeof(int),
+							"task_struct rss_stat MM_FILEPAGES",
+							RETURN_ON_ERROR))
+								continue;
 
-					rss += sync_rss;
+						if (sync_rss > 0)
+							rss_cache += sync_rss;
 
-					/* count 1 -> anonpages */
-					if (!readmem(first->task +
-						OFFSET(task_struct_rss_stat) +
-						OFFSET(task_rss_stat_count) +
-						sizeof(int),
-						KVADDR, &sync_rss,
-						sizeof(int),
-						"task_struct rss_stat MM_ANONPAGES",
-						RETURN_ON_ERROR))
-							continue;
+						/* count 1 -> anonpages */
+						if (!readmem(first->task +
+							OFFSET(task_struct_rss_stat) +
+							OFFSET(task_rss_stat_count) +
+							sizeof(int),
+							KVADDR, &sync_rss,
+							sizeof(int),
+							"task_struct rss_stat MM_ANONPAGES",
+							RETURN_ON_ERROR))
+								continue;
 
-					rss += sync_rss;
+						if (sync_rss > 0)
+							rss_cache += sync_rss;
 
-					if (first == last)
-						break;
-					first++;
+						if (first == last)
+							break;
+						first++;
+					}
+					last->rss_cache = rss_cache;
 				}
 
+				rss += last->rss_cache;
 				tt->last_tgid = last;
 			}
 		}
@@ -6568,7 +6612,7 @@ page_flags_init_from_pageflag_names(void)
 		}
 
 		if (!read_string((ulong)name, namebuf, BUFSIZE-1)) {
-			error(INFO, "failed to read pageflag_names entry (i: %d  name: \"%s\"  mask: %ld)\n",
+			error(INFO, "failed to read pageflag_names entry (i: %d  name: %lx  mask: %lx)\n",
 				i, name, mask);
 			goto pageflags_fail;
 		}
@@ -8830,7 +8874,7 @@ dump_vmlist(struct meminfo *vi)
 				    (vi->spec_addr < (paddr+PAGESIZE()))) {
 					if (vi->flags & GET_PHYS_TO_VMALLOC) {
 						vi->retval = pcheck +
-						    PAGEOFFSET(paddr);
+						    PAGEOFFSET(vi->spec_addr);
 						return;
 				        } else
 						fprintf(fp,
@@ -8979,7 +9023,7 @@ dump_vmap_area(struct meminfo *vi)
 				    (vi->spec_addr < (paddr+PAGESIZE()))) {
 					if (vi->flags & GET_PHYS_TO_VMALLOC) {
 						vi->retval = pcheck +
-						    PAGEOFFSET(paddr);
+						    PAGEOFFSET(vi->spec_addr);
 						FREEBUF(ld->list_ptr);
 						return;
 				        } else
@@ -13446,6 +13490,10 @@ kmem_search(struct meminfo *mi)
 	 *  Check for a valid mapped address.
 	 */
 	if ((mi->memtype == KVADDR) && IS_VMALLOC_ADDR(mi->spec_addr)) {
+		if ((task = stkptr_to_task(vaddr)) && (tc = task_to_context(task))) {
+			show_context(tc);
+			fprintf(fp, "\n");
+		}
 		if (kvtop(NULL, mi->spec_addr, &paddr, 0)) {
 			mi->flags = orig_flags | VMLIST_VERIFY;
 			dump_vmlist(mi);
@@ -13471,6 +13519,10 @@ kmem_search(struct meminfo *mi)
 		mi->flags &= ~GET_PHYS_TO_VMALLOC;
 
 		if (mi->retval) {
+			if ((task = stkptr_to_task(mi->retval)) && (tc = task_to_context(task))) {
+				show_context(tc);
+				fprintf(fp, "\n");
+			}
 			if ((sp = value_search(mi->retval, &offset))) {
                         	show_symbol(sp, offset, 
 					SHOW_LINENUM | SHOW_RADIX());
@@ -13527,11 +13579,11 @@ kmem_search(struct meminfo *mi)
 	/*
 	 *  Check whether it's a current task or stack address.
 	 */
-	if ((mi->memtype == KVADDR) && (task = vaddr_in_task_struct(vaddr)) &&
+	if ((mi->memtype & (KVADDR|PHYSADDR)) && (task = vaddr_in_task_struct(vaddr)) &&
 	    (tc = task_to_context(task))) {
 		show_context(tc);
 		fprintf(fp, "\n");
-	} else if ((mi->memtype == KVADDR) && (task = stkptr_to_task(vaddr)) &&
+	} else if ((mi->memtype & (KVADDR|PHYSADDR)) && (task = stkptr_to_task(vaddr)) &&
 	    (tc = task_to_context(task))) {
 		show_context(tc);
 		fprintf(fp, "\n");
