@@ -71,6 +71,7 @@ static void print_neighbour_q(ulong, int);
 static void get_netdev_info(ulong, struct devinfo *);
 static void get_device_name(ulong, char *);
 static long get_device_address(ulong, char **, long);
+static void get_device_ip6_address(ulong, char **, long);
 static void get_sock_info(ulong, char *);
 static void dump_arp(void);
 static void arp_state_to_flags(unsigned char);
@@ -114,6 +115,13 @@ net_init(void)
 		net->dev_ip_ptr = MEMBER_OFFSET_INIT(net_device_ip_ptr,
 			"net_device", "ip_ptr");
 		MEMBER_OFFSET_INIT(net_device_dev_list, "net_device", "dev_list");
+		MEMBER_OFFSET_INIT(net_device_ip6_ptr, "net_device", "ip6_ptr");
+		MEMBER_OFFSET_INIT(inet6_dev_addr_list, "inet6_dev", "addr_list");
+		MEMBER_OFFSET_INIT(inet6_ifaddr_addr, "inet6_ifaddr", "addr");
+		MEMBER_OFFSET_INIT(inet6_ifaddr_if_list, "inet6_ifaddr", "if_list");
+		MEMBER_OFFSET_INIT(inet6_ifaddr_if_next, "inet6_ifaddr", "if_next");
+		MEMBER_OFFSET_INIT(in6_addr_in6_u, "in6_addr", "in6_u");
+
 		MEMBER_OFFSET_INIT(net_dev_base_head, "net", "dev_base_head");
 		ARRAY_LENGTH_INIT(net->net_device_name_index,
 			net_device_name, "net_device.name", NULL, sizeof(char));
@@ -199,6 +207,9 @@ net_init(void)
 			MEMBER_OFFSET_INIT(sock_common_skc_family,
 				"sock_common", "skc_family");
 			MEMBER_OFFSET_INIT(sock_sk_type, "sock", "sk_type");
+			MEMBER_OFFSET_INIT(sock_sk_common, "sock", "__sk_common");
+			MEMBER_OFFSET_INIT(sock_common_skc_v6_daddr, "sock_common", "skc_v6_daddr");
+			MEMBER_OFFSET_INIT(sock_common_skc_v6_rcv_saddr, "sock_common", "skc_v6_rcv_saddr");
 			/*
 			 *  struct inet_sock {
         		 *	struct sock       sk;
@@ -409,6 +420,9 @@ cmd_net(void)
 				case STR_PID:
 				case STR_TASK:
 					task = tc->task;
+					break;
+				case STR_INVALID:
+					error(FATAL, "invalid task or pid value: %s\n", args[optind]);
 				}
 			}
 			break;
@@ -463,7 +477,7 @@ show_net_devices(ulong task)
 	buf = GETBUF(buflen);
 	flen = MAX(VADDR_PRLEN, strlen(net->netdevice));
 
-	fprintf(fp, "%s  NAME   IP ADDRESS(ES)\n",
+	fprintf(fp, "%s  NAME       IP ADDRESS(ES)\n",
 		mkstring(upper_case(net->netdevice, buf), 
 			flen, CENTER|LJUST, NULL));
 
@@ -472,9 +486,10 @@ show_net_devices(ulong task)
                     mkstring(buf, flen, CENTER|RJUST|LONG_HEX, MKSTR(next)));
 
 		get_device_name(next, buf);
-		fprintf(fp, "%-6s ", buf);
+		fprintf(fp, "%-10s ", buf);
 
-		buflen = get_device_address(next, &buf, buflen);
+		get_device_address(next, &buf, buflen);
+		get_device_ip6_address(next, &buf, buflen);
 		fprintf(fp, "%s\n", buf);
 
         	readmem(next+net->dev_next, KVADDR, &next, 
@@ -500,7 +515,7 @@ show_net_devices_v2(ulong task)
 	buf = GETBUF(buflen);
 	flen = MAX(VADDR_PRLEN, strlen(net->netdevice));
 
-	fprintf(fp, "%s  NAME   IP ADDRESS(ES)\n",
+	fprintf(fp, "%s  NAME       IP ADDRESS(ES)\n",
 		mkstring(upper_case(net->netdevice, buf), 
 			flen, CENTER|LJUST, NULL));
 
@@ -525,9 +540,10 @@ show_net_devices_v2(ulong task)
 			MKSTR(ld->list_ptr[i])));
 
 		get_device_name(ld->list_ptr[i], buf);
-		fprintf(fp, "%-6s ", buf);
+		fprintf(fp, "%-10s ", buf);
 
-		buflen = get_device_address(ld->list_ptr[i], &buf, buflen);
+		get_device_address(ld->list_ptr[i], &buf, buflen);
+		get_device_ip6_address(ld->list_ptr[i], &buf, buflen);
 		fprintf(fp, "%s\n", buf);
 	}
 	
@@ -553,7 +569,7 @@ show_net_devices_v3(ulong task)
 	buf = GETBUF(buflen);
 	flen = MAX(VADDR_PRLEN, strlen(net->netdevice));
 
-	fprintf(fp, "%s  NAME   IP ADDRESS(ES)\n",
+	fprintf(fp, "%s  NAME       IP ADDRESS(ES)\n",
 		mkstring(upper_case(net->netdevice, buf), 
 			flen, CENTER|LJUST, NULL));
 
@@ -588,9 +604,10 @@ show_net_devices_v3(ulong task)
 			MKSTR(ld->list_ptr[i])));
 
 		get_device_name(ld->list_ptr[i], buf);
-		fprintf(fp, "%-6s ", buf);
+		fprintf(fp, "%-10s ", buf);
 
-		buflen = get_device_address(ld->list_ptr[i], &buf, buflen);
+		get_device_address(ld->list_ptr[i], &buf, buflen);
+		get_device_ip6_address(ld->list_ptr[i], &buf, buflen);
 		fprintf(fp, "%s\n", buf);
 	}
 	
@@ -922,6 +939,89 @@ get_device_address(ulong devaddr, char **bufp, long buflen)
 	return buflen;
 }
 
+static void
+get_device_ip6_address(ulong devaddr, char **bufp, long buflen)
+{
+	ulong ip6_ptr = 0, pos = 0, bufsize = buflen, addr = 0;
+	struct in6_addr ip6_addr;
+	char *buf;
+	char str[INET6_ADDRSTRLEN] = {0};
+	char buffer[INET6_ADDRSTRLEN + 2] = {0};
+	uint len = 0;
+
+	buf = *bufp;
+	pos = strlen(buf);
+
+	readmem(devaddr + OFFSET(net_device_ip6_ptr), KVADDR,
+		&ip6_ptr, sizeof(ulong), "ip6_ptr", FAULT_ON_ERROR);
+
+	if (!ip6_ptr)
+		return;
+
+	/*
+	 * 502a2ffd7376 ("ipv6: convert idev_list to list macros")
+	 * v2.6.35-rc1~473^2~733
+	 */
+	if (VALID_MEMBER(inet6_ifaddr_if_list)) {
+		struct list_data list_data, *ld;
+		ulong cnt = 0, i;
+
+		ld = &list_data;
+		BZERO(ld, sizeof(struct list_data));
+		ld->flags |= LIST_ALLOCATE;
+		ld->start = ip6_ptr + OFFSET(inet6_dev_addr_list);
+		ld->list_head_offset = OFFSET(inet6_ifaddr_if_list);
+		cnt = do_list(ld);
+
+		for (i = 1; i < cnt; i++) {
+
+			addr = ld->list_ptr[i] + OFFSET(inet6_ifaddr_addr);
+			readmem(addr + OFFSET(in6_addr_in6_u), KVADDR, &ip6_addr,
+				sizeof(struct in6_addr), "in6_addr.in6_u", FAULT_ON_ERROR);
+
+			inet_ntop(AF_INET6, (void*)&ip6_addr, str, INET6_ADDRSTRLEN);
+			sprintf(buffer, "%s%s", pos ? ", " : "", str);
+			len = strlen(buffer);
+			if (pos + len >= bufsize) {
+				RESIZEBUF(*bufp, bufsize, bufsize + buflen);
+				buf = *bufp;
+				BZERO(buf + bufsize, buflen);
+				bufsize += buflen;
+			}
+			BCOPY(buffer, &buf[pos], len);
+			pos += len;
+		}
+
+		FREEBUF(ld->list_ptr);
+		return;
+	}
+
+	if (INVALID_MEMBER(inet6_ifaddr_if_next))
+		return;
+
+	readmem(ip6_ptr + OFFSET(inet6_dev_addr_list), KVADDR,
+		&addr, sizeof(void *), "inet6_dev.addr_list", FAULT_ON_ERROR);
+
+	while (addr) {
+		readmem(addr + OFFSET(in6_addr_in6_u), KVADDR, &ip6_addr,
+			sizeof(struct in6_addr), "in6_addr.in6_u", FAULT_ON_ERROR);
+		inet_ntop(AF_INET6, (void*)&ip6_addr, str, INET6_ADDRSTRLEN);
+		sprintf(buffer, "%s%s", pos ? ", " : "", str);
+		len = strlen(buffer);
+
+		if (pos + len >= bufsize) {
+			RESIZEBUF(*bufp, bufsize, bufsize + buflen);
+			buf = *bufp;
+			BZERO(buf + bufsize, buflen);
+			bufsize += buflen;
+		}
+		BCOPY(buffer, &buf[pos], len);
+		pos += len;
+		readmem(addr + OFFSET(inet6_ifaddr_if_next), KVADDR, &addr,
+			sizeof(void *), "inet6_ifaddr.if_next", FAULT_ON_ERROR);
+	}
+}
+
 /*
  *  Get the family, type, local and destination address/port pairs.
  */
@@ -1104,12 +1204,19 @@ get_sock_info(ulong sock, char *buf)
 		break;
 
 	case SOCK_V2:
-		if (INVALID_MEMBER(ipv6_pinfo_rcv_saddr) ||
-		    INVALID_MEMBER(ipv6_pinfo_daddr))
+		if (VALID_MEMBER(ipv6_pinfo_rcv_saddr) &&
+		    VALID_MEMBER(ipv6_pinfo_daddr)) {
+			ipv6_rcv_saddr = ipv6_pinfo + OFFSET(ipv6_pinfo_rcv_saddr);
+			ipv6_daddr = ipv6_pinfo + OFFSET(ipv6_pinfo_daddr);
+		} else if (VALID_MEMBER(sock_sk_common) &&
+			   VALID_MEMBER(sock_common_skc_v6_daddr) &&
+			   VALID_MEMBER(sock_common_skc_v6_rcv_saddr)) {
+			ipv6_rcv_saddr = sock + OFFSET(sock_sk_common) + OFFSET(sock_common_skc_v6_rcv_saddr);
+			ipv6_daddr = sock + OFFSET(sock_sk_common) + OFFSET(sock_common_skc_v6_daddr);
+		} else {
+			sprintf(&buf[strlen(buf)], "%s", "(cannot get IPv6 addresses)");
 			break;
-
-        	ipv6_rcv_saddr = ipv6_pinfo + OFFSET(ipv6_pinfo_rcv_saddr);
-		ipv6_daddr = ipv6_pinfo + OFFSET(ipv6_pinfo_daddr);
+		}
 
 		if (!readmem(ipv6_rcv_saddr, KVADDR, u6_addr16_src, SIZE(in6_addr),
                     "ipv6_rcv_saddr buffer", QUIET|RETURN_ON_ERROR))

@@ -122,7 +122,7 @@ static int x86_64_do_not_cache_framesize(struct syment *, ulong);
 static int x86_64_framesize_cache_func(int, ulong, int *, int, struct syment *);
 static ulong x86_64_get_framepointer(struct bt_info *, ulong);
 int search_for_eframe_target_caller(struct bt_info *, ulong, int *);
-static int x86_64_get_framesize(struct bt_info *, ulong, ulong);
+static int x86_64_get_framesize(struct bt_info *, ulong, ulong, char *);
 static void x86_64_framesize_debug(struct bt_info *);
 static void x86_64_get_active_set(void);
 static int x86_64_get_kvaddr_ranges(struct vaddr_range *);
@@ -1290,11 +1290,14 @@ x86_64_per_cpu_init(void)
 {
 	int i, cpus, cpunumber;
 	struct machine_specific *ms;
-	struct syment *irq_sp, *curr_sp, *cpu_sp, *hardirq_stack_ptr_sp;
+	struct syment *irq_sp, *curr_sp, *cpu_sp, *hardirq_stack_ptr_sp, *pcpu_sp;
 	ulong hardirq_stack_ptr;
 	ulong __per_cpu_load = 0;
+	long hardirq_addr = 0, cpu_addr = 0, curr_addr = 0;
 
 	ms = machdep->machspec;
+
+	pcpu_sp = per_cpu_symbol_search("pcpu_hot");
 
 	hardirq_stack_ptr_sp = per_cpu_symbol_search("hardirq_stack_ptr");
 	irq_sp = per_cpu_symbol_search("per_cpu__irq_stack_union");
@@ -1324,7 +1327,7 @@ x86_64_per_cpu_init(void)
 		return;
 	}
 
-	if (!cpu_sp || (!irq_sp && !hardirq_stack_ptr_sp))
+	if (!pcpu_sp && (!cpu_sp || (!irq_sp && !hardirq_stack_ptr_sp)))
 		return;
 
 	if (MEMBER_EXISTS("irq_stack_union", "irq_stack"))
@@ -1337,10 +1340,21 @@ x86_64_per_cpu_init(void)
 	if (kernel_symbol_exists("__per_cpu_load"))
 		__per_cpu_load = symbol_value("__per_cpu_load");
 
+	if (pcpu_sp) {
+		hardirq_addr = pcpu_sp->value + MEMBER_OFFSET("pcpu_hot", "hardirq_stack_ptr");
+		cpu_addr = pcpu_sp->value + MEMBER_OFFSET("pcpu_hot", "cpu_number");
+		curr_addr = pcpu_sp->value + MEMBER_OFFSET("pcpu_hot", "current_task");
+	} else {
+		if (hardirq_stack_ptr_sp)
+			hardirq_addr = hardirq_stack_ptr_sp->value;
+		cpu_addr = cpu_sp->value;
+		curr_addr = curr_sp->value;
+	}
+
 	for (i = cpus = 0; i < NR_CPUS; i++) {
 		if (__per_cpu_load && kt->__per_cpu_offset[i] == __per_cpu_load)
 			break;
-		if (!readmem(cpu_sp->value + kt->__per_cpu_offset[i],
+		if (!readmem(cpu_addr + kt->__per_cpu_offset[i],
 		    KVADDR, &cpunumber, sizeof(int),
 		    "cpu number (per_cpu)", QUIET|RETURN_ON_ERROR))
 			break;
@@ -1349,8 +1363,8 @@ x86_64_per_cpu_init(void)
 			break;
 		cpus++;
 
-		if (hardirq_stack_ptr_sp) {
-			if (!readmem(hardirq_stack_ptr_sp->value + kt->__per_cpu_offset[i],
+		if (pcpu_sp || hardirq_stack_ptr_sp) {
+			if (!readmem(hardirq_addr + kt->__per_cpu_offset[i],
 		    	    KVADDR, &hardirq_stack_ptr, sizeof(void *),
 		    	    "hardirq_stack_ptr (per_cpu)", QUIET|RETURN_ON_ERROR))
 				continue;
@@ -1373,13 +1387,13 @@ x86_64_per_cpu_init(void)
 	else
 		kt->cpus = cpus;
 
-	if (DUMPFILE() && curr_sp) {
+	if (DUMPFILE() && (pcpu_sp || curr_sp)) {
 		if ((ms->current = calloc(kt->cpus, sizeof(ulong))) == NULL)
 			error(FATAL, 
 			    "cannot calloc %d x86_64 current pointers!\n",
 				kt->cpus);
 		for (i = 0; i < kt->cpus; i++)
-			if (!readmem(curr_sp->value + kt->__per_cpu_offset[i], 
+			if (!readmem(curr_addr + kt->__per_cpu_offset[i],
 			    KVADDR, &ms->current[i], sizeof(ulong),
 			    "current_task (per_cpu)", RETURN_ON_ERROR))
 				continue;
@@ -3628,7 +3642,7 @@ in_exception_stack:
 				bt, ofp);
                         rsp += SIZE(pt_regs);  /* guaranteed kernel mode */
 			if (bt->eframe_ip && ((framesize = x86_64_get_framesize(bt, 
-			    bt->eframe_ip, rsp)) >= 0))
+			    bt->eframe_ip, rsp, NULL)) >= 0))
 				rsp += framesize;
                         level++;
                         irq_eframe = 0;
@@ -3660,7 +3674,7 @@ in_exception_stack:
 	                case BACKTRACE_ENTRY_DISPLAYED:
 	                        level++;
 				if ((framesize = x86_64_get_framesize(bt, 
-				    bt->eframe_ip ?  bt->eframe_ip : *up, rsp)) >= 0) {
+				    bt->eframe_ip ?  bt->eframe_ip : *up, rsp, NULL)) >= 0) {
 					rsp += framesize;
 					i += framesize/sizeof(ulong);
 				}
@@ -3733,7 +3747,7 @@ in_exception_stack:
 			}
 
 			level++;
-			if ((framesize = x86_64_get_framesize(bt, bt->instptr, rsp)) >= 0)
+			if ((framesize = x86_64_get_framesize(bt, bt->instptr, rsp, NULL)) >= 0)
 				rsp += framesize;
 		}
 	}
@@ -3785,7 +3799,7 @@ in_exception_stack:
                         case BACKTRACE_ENTRY_DISPLAYED:
                                 level++;
 				if ((framesize = x86_64_get_framesize(bt, 
-				    bt->eframe_ip ? bt->eframe_ip : *up, rsp)) >= 0) {
+				    bt->eframe_ip ? bt->eframe_ip : *up, rsp, NULL)) >= 0) {
 					rsp += framesize;
 					i += framesize/sizeof(ulong);
 				}
@@ -3811,10 +3825,11 @@ in_exception_stack:
 		up -= 1;
                 bt->instptr = *up;
 		/*
-		 *  No exception frame when coming from call_softirq.
+		 *  No exception frame when coming from do_softirq_own_stack
+		 *  or call_softirq.
 		 */
 		if ((sp = value_search(bt->instptr, &offset)) && 
-		    STREQ(sp->name, "call_softirq"))
+		    (STREQ(sp->name, "do_softirq_own_stack") || STREQ(sp->name, "call_softirq")))
 			irq_eframe = 0;
                 bt->frameptr = 0;
                 done = FALSE;
@@ -3894,24 +3909,34 @@ in_exception_stack:
 	    (STREQ(rip_symbol, "thread_return") || 
 	     STREQ(rip_symbol, "schedule") || 
 	     STREQ(rip_symbol, "__schedule"))) {
-		if (STREQ(rip_symbol, "__schedule")) {
-			i = (rsp - bt->stackbase)/sizeof(ulong);
-			x86_64_print_stack_entry(bt, ofp, level, 
-				i, bt->instptr);
-			level++;
-			rsp = __schedule_frame_adjust(rsp, bt);
-			if (STREQ(closest_symbol(bt->instptr), "schedule"))
+		if ((machdep->flags & ORC) && VALID_MEMBER(inactive_task_frame_ret_addr)) {
+			/*
+			 * %rsp should have the address of inactive_task_frame, so
+			 * skip the registers before ret_addr to adjust rsp.
+			 */
+			if (CRASHDEBUG(1))
+				fprintf(fp, "rsp: %lx rbp: %lx\n", rsp, bt->bptr);
+			rsp += OFFSET(inactive_task_frame_ret_addr);
+		} else {
+			if (STREQ(rip_symbol, "__schedule")) {
+				i = (rsp - bt->stackbase)/sizeof(ulong);
+				x86_64_print_stack_entry(bt, ofp, level,
+					i, bt->instptr);
+				level++;
+				rsp = __schedule_frame_adjust(rsp, bt);
+				if (STREQ(closest_symbol(bt->instptr), "schedule"))
+					bt->flags |= BT_SCHEDULE;
+			} else
 				bt->flags |= BT_SCHEDULE;
-		} else
-			bt->flags |= BT_SCHEDULE;
 
-		if (bt->flags & BT_SCHEDULE) {
-			i = (rsp - bt->stackbase)/sizeof(ulong);
-			x86_64_print_stack_entry(bt, ofp, level, 
-				i, bt->instptr);
-			bt->flags &= ~(ulonglong)BT_SCHEDULE;
-			rsp += sizeof(ulong);
-			level++;
+			if (bt->flags & BT_SCHEDULE) {
+				i = (rsp - bt->stackbase)/sizeof(ulong);
+				x86_64_print_stack_entry(bt, ofp, level,
+					i, bt->instptr);
+				bt->flags &= ~(ulonglong)BT_SCHEDULE;
+				rsp += sizeof(ulong);
+				level++;
+			}
 		}
 	}
 
@@ -3924,6 +3949,11 @@ in_exception_stack:
         if (irq_eframe) {
                 bt->flags |= BT_EXCEPTION_FRAME;
                 i = (irq_eframe - bt->stackbase)/sizeof(ulong);
+                if (symbol_exists("asm_common_interrupt")) {
+			i -= 1;
+			up = (ulong *)(&bt->stackbuf[i*sizeof(ulong)]);
+			bt->instptr = *up;
+                }
                 x86_64_print_stack_entry(bt, ofp, level, i, bt->instptr);
                 bt->flags &= ~(ulonglong)BT_EXCEPTION_FRAME;
                 cs = x86_64_exception_frame(EFRAME_PRINT|EFRAME_CS, 0, 
@@ -3937,7 +3967,7 @@ in_exception_stack:
 			irq_eframe = 0;
 			bt->flags |= BT_EFRAME_TARGET;
 			if (bt->eframe_ip && ((framesize = x86_64_get_framesize(bt, 
-			    bt->eframe_ip, rsp)) >= 0))
+			    bt->eframe_ip, rsp, NULL)) >= 0))
 				rsp += framesize;
 			bt->flags &= ~BT_EFRAME_TARGET;
 		}
@@ -4024,7 +4054,7 @@ in_exception_stack:
 		case BACKTRACE_ENTRY_DISPLAYED:
 			level++;
 			if ((framesize = x86_64_get_framesize(bt, 
-			    bt->eframe_ip ? bt->eframe_ip : *up, rsp)) >= 0) {
+			    bt->eframe_ip ? bt->eframe_ip : *up, rsp, (char *)up)) >= 0) {
 				rsp += framesize;
 				i += framesize/sizeof(ulong);
 			}
@@ -4735,7 +4765,8 @@ x86_64_exception_frame(ulong flags, ulong kvaddr, char *local,
 		bt->instptr = rip;
 		bt->stkptr = rsp;
 		bt->bptr = rbp;
-	}
+	} else if (machdep->flags & ORC)
+		bt->bptr = rbp;
 
 	if (kvaddr)
 		FREEBUF(pt_regs_buf);
@@ -5295,6 +5326,10 @@ x86_64_get_sp(struct bt_info *bt)
 			OFFSET(thread_struct_rsp), KVADDR,
                         &rsp, sizeof(void *),
                         "thread_struct rsp", FAULT_ON_ERROR);
+		if ((machdep->flags & ORC) && VALID_MEMBER(inactive_task_frame_bp)) {
+			readmem(rsp + OFFSET(inactive_task_frame_bp), KVADDR, &bt->bptr,
+				sizeof(void *), "inactive_task_frame.bp", FAULT_ON_ERROR);
+		}
                 return rsp;
         }
 
@@ -5625,11 +5660,19 @@ x86_64_get_smp_cpus(void)
 	char *cpu_pda_buf;
 	ulong level4_pgt, cpu_pda_addr;
 	struct syment *sp;
-	ulong __per_cpu_load = 0;
+	ulong __per_cpu_load = 0, cpu_addr;
 
 	if (!VALID_STRUCT(x8664_pda)) {
-		if (!(sp = per_cpu_symbol_search("per_cpu__cpu_number")) ||
-		    !(kt->flags & PER_CPU_OFF))
+
+		if (!(kt->flags & PER_CPU_OFF))
+			return 1;
+
+		if ((sp = per_cpu_symbol_search("pcpu_hot")) &&
+		    (cpu_addr = MEMBER_OFFSET("pcpu_hot", "cpu_number")) != INVALID_OFFSET)
+			cpu_addr += sp->value;
+		else if ((sp = per_cpu_symbol_search("per_cpu__cpu_number")))
+			cpu_addr = sp->value;
+		else
 			return 1;
 
 		if (kernel_symbol_exists("__per_cpu_load"))
@@ -5638,7 +5681,7 @@ x86_64_get_smp_cpus(void)
 		for (i = cpus = 0; i < NR_CPUS; i++) {
 			if (__per_cpu_load && kt->__per_cpu_offset[i] == __per_cpu_load)
 				break;
-			if (!readmem(sp->value + kt->__per_cpu_offset[i], 
+			if (!readmem(cpu_addr + kt->__per_cpu_offset[i],
 			    KVADDR, &cpunumber, sizeof(int),
 			    "cpu number (per_cpu)", QUIET|RETURN_ON_ERROR))
 				break;
@@ -6393,6 +6436,9 @@ x86_64_ORC_init(void)
 	orc->__stop_orc_unwind = symbol_value("__stop_orc_unwind");
 	orc->orc_lookup = symbol_value("orc_lookup");
 
+	MEMBER_OFFSET_INIT(inactive_task_frame_bp, "inactive_task_frame", "bp");
+	MEMBER_OFFSET_INIT(inactive_task_frame_ret_addr, "inactive_task_frame", "ret_addr");
+
 	machdep->flags |= ORC;
 }
 
@@ -6498,6 +6544,14 @@ x86_64_irq_eframe_link_init(void)
 		machdep->machspec->irq_eframe_link = 0;
 	else
 		return; 
+
+	if (symbol_exists("asm_common_interrupt")) {
+		if (symbol_exists("asm_call_on_stack"))
+			machdep->machspec->irq_eframe_link = -64;
+		else
+			machdep->machspec->irq_eframe_link = -32;
+		return;
+	}
 
 	if (THIS_KERNEL_VERSION < LINUX(2,6,9)) 
 		return;
@@ -8059,7 +8113,7 @@ x86_64_init_hyper(int when)
                 machdep->pageshift = ffs(machdep->pagesize) - 1;
                 machdep->pageoffset = machdep->pagesize - 1;
                 machdep->pagemask = ~((ulonglong)machdep->pageoffset);
-		machdep->stacksize = machdep->pagesize * 2;
+		machdep->stacksize = machdep->pagesize * 8;
                 if ((machdep->pgd = (char *)malloc(PAGESIZE())) == NULL)
                         error(FATAL, "cannot malloc pgd space.");
 		if ((machdep->pud = (char *)malloc(PAGESIZE())) == NULL)
@@ -8453,7 +8507,7 @@ search_for_eframe_target_caller(struct bt_info *bt, ulong stkptr, int *framesize
 	(BT_OLD_BACK_TRACE|BT_TEXT_SYMBOLS|BT_TEXT_SYMBOLS_ALL|BT_FRAMESIZE_DISABLE)
  
 static int
-x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
+x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp, char *stack_ptr)
 {
 	int c, framesize, instr, arg, max;
 	struct syment *sp;
@@ -8554,19 +8608,49 @@ x86_64_get_framesize(struct bt_info *bt, ulong textaddr, ulong rsp)
 	if ((machdep->flags & ORC) && (korc = orc_find(textaddr))) {
 		if (CRASHDEBUG(1)) {
 			fprintf(fp, 
-			    "rsp: %lx textaddr: %lx framesize: %d -> spo: %d bpo: %d spr: %d bpr: %d type: %d %s", 
-				rsp, textaddr, framesize, korc->sp_offset, korc->bp_offset, 
-				korc->sp_reg, korc->bp_reg, korc->type,
-				(korc->type == ORC_TYPE_CALL) && (korc->sp_reg == ORC_REG_SP) ? "" : "(UNUSED)");
+			    "rsp: %lx textaddr: %lx -> spo: %d bpo: %d spr: %d bpr: %d type: %d",
+				rsp, textaddr, korc->sp_offset, korc->bp_offset,
+				korc->sp_reg, korc->bp_reg, korc->type);
 			if (MEMBER_EXISTS("orc_entry", "end"))
 				fprintf(fp, " end: %d", korc->end);
 			fprintf(fp, "\n");
 		}
 
-		if ((korc->type == ORC_TYPE_CALL) && (korc->sp_reg == ORC_REG_SP)) {
-			framesize = (korc->sp_offset - 8);
-			return (x86_64_framesize_cache_func(FRAMESIZE_ENTER, textaddr, 
-				&framesize, exception, NULL));
+		if (korc->type == ORC_TYPE_CALL) {
+			ulong prev_sp = 0, prev_bp = 0;
+			framesize = -1;
+
+			if (korc->sp_reg == ORC_REG_SP) {
+				framesize = (korc->sp_offset - 8);
+
+				/* rsp points to a return address, so +8 to use sp_offset */
+				prev_sp = (rsp + 8) + korc->sp_offset;
+				if (CRASHDEBUG(1))
+					fprintf(fp, "rsp: %lx prev_sp: %lx framesize: %d\n",
+							rsp, prev_sp, framesize);
+			} else if ((korc->sp_reg == ORC_REG_BP) && bt->bptr) {
+				prev_sp = bt->bptr + korc->sp_offset;
+				framesize = (prev_sp - (rsp + 8) - 8);
+				if (CRASHDEBUG(1))
+					fprintf(fp, "rsp: %lx rbp: %lx prev_sp: %lx framesize: %d\n",
+							rsp, bt->bptr, prev_sp, framesize);
+			}
+
+			if ((korc->bp_reg == ORC_REG_PREV_SP) && prev_sp) {
+				prev_bp = prev_sp + korc->bp_offset;
+				if (stack_ptr && INSTACK(prev_bp, bt)) {
+					bt->bptr = ULONG(stack_ptr + (prev_bp - rsp));
+					if (CRASHDEBUG(1))
+						fprintf(fp, "rsp: %lx prev_sp: %lx prev_bp: %lx -> %lx\n",
+								rsp, prev_sp, prev_bp, bt->bptr);
+				} else
+					bt->bptr = 0;
+			} else if ((korc->bp_reg != ORC_REG_UNDEFINED))
+				bt->bptr = 0;
+
+			if (framesize >= 0)
+				/* Do not cache this, possibly it may be variable. */
+				return framesize;
 		}
 	}
 
@@ -8722,7 +8806,7 @@ x86_64_framesize_debug(struct bt_info *bt)
 		if (!bt->hp->eip)
 			error(INFO, "x86_64_framesize_debug: ignoring command\n");
 		else
-			x86_64_get_framesize(bt, bt->hp->eip, 0);
+			x86_64_get_framesize(bt, bt->hp->eip, 0, NULL);
 		break;
 
 	case -3:

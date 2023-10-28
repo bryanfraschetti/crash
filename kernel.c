@@ -316,6 +316,8 @@ kernel_init()
 	}
 
 	MEMBER_OFFSET_INIT(percpu_counter_count, "percpu_counter", "count");
+	MEMBER_OFFSET_INIT(percpu_counter_counters, "percpu_counter", "counters");
+	STRUCT_SIZE_INIT(percpu_counter, "percpu_counter");
 
 	if (STRUCT_EXISTS("runqueue")) {
 		rqstruct = "runqueue";
@@ -2110,6 +2112,10 @@ cmd_dis(void)
 			rewind(pc->tmpfile);
 
 		while (fgets(buf2, BUFSIZE, pc->tmpfile)) {
+
+			if (STRNEQ(buf2, "=>"))
+				shift_string_left(buf2, 2);
+
 			strip_beginning_whitespace(buf2);
 
 			if (do_load_module_filter)

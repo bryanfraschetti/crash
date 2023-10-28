@@ -3743,6 +3743,11 @@ is_kernel(char *file)
 				goto bailout;
 			break;
 
+		case EM_RISCV:
+			if (machine_type_mismatch(file, "RISCV64", NULL, 0))
+				goto bailout;
+			break;
+
 		default:
 			if (machine_type_mismatch(file, "(unknown)", NULL, 0))
 				goto bailout;
@@ -4000,6 +4005,11 @@ is_shared_object(char *file)
 
 		case EM_MIPS:
 			if (machine_type("MIPS64"))
+				return TRUE;
+			break;
+
+		case EM_RISCV:
+			if (machine_type("RISCV64"))
 				return TRUE;
 			break;
 		}
@@ -8812,6 +8822,7 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(task_struct_tss_ksp));
         fprintf(fp, "        task_struct_thread_eip: %ld\n",
                 OFFSET(task_struct_thread_eip));
+	fprintf(fp, "        inactive_task_frame_bp: %ld\n", OFFSET(inactive_task_frame_bp));
 	fprintf(fp, "  inactive_task_frame_ret_addr: %ld\n",
 		OFFSET(inactive_task_frame_ret_addr));
         fprintf(fp, "        task_struct_thread_esp: %ld\n",
@@ -9700,6 +9711,7 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(slab_inuse));
         fprintf(fp, "                     slab_free: %ld\n",
                 OFFSET(slab_free));
+        fprintf(fp, "                slab_slab_list: %ld\n", OFFSET(slab_slab_list));
 
         fprintf(fp, "               kmem_cache_size: %ld\n",
                 OFFSET(kmem_cache_size));
@@ -9775,6 +9787,7 @@ dump_offset_table(char *spec, ulong makestruct)
         	OFFSET(net_device_addr_len));
 	fprintf(fp, "             net_device_ip_ptr: %ld\n",
         	OFFSET(net_device_ip_ptr));
+	fprintf(fp, "            net_device_ip6_ptr: %ld\n", OFFSET(net_device_ip6_ptr));
 	fprintf(fp, "           net_device_dev_list: %ld\n",
 		OFFSET(net_device_dev_list));
 	fprintf(fp, "             net_dev_base_head: %ld\n",
@@ -9807,8 +9820,11 @@ dump_offset_table(char *spec, ulong makestruct)
 
         fprintf(fp, "                  sock_sk_type: %ld\n", 
 		OFFSET(sock_sk_type));
+	fprintf(fp, "                sock_sk_common: %ld\n", OFFSET(sock_sk_common));
         fprintf(fp, "        sock_common_skc_family: %ld\n", 
 		OFFSET(sock_common_skc_family));
+	fprintf(fp, "      sock_common_skc_v6_daddr: %ld\n", OFFSET(sock_common_skc_v6_daddr));
+	fprintf(fp, "  sock_common_skc_v6_rcv_saddr: %ld\n", OFFSET(sock_common_skc_v6_rcv_saddr));
 	fprintf(fp, "        socket_alloc_vfs_inode: %ld\n",
 		OFFSET(socket_alloc_vfs_inode));
         fprintf(fp, "                inet_sock_inet: %ld\n", 
@@ -9824,6 +9840,11 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "                  inet_opt_num: %ld\n", 
 		OFFSET(inet_opt_num));
 
+	fprintf(fp, "           inet6_dev_addr_list: %ld\n", OFFSET(inet6_dev_addr_list));
+	fprintf(fp, "             inet6_ifaddr_addr: %ld\n", OFFSET(inet6_ifaddr_addr));
+	fprintf(fp, "          inet6_ifaddr_if_list: %ld\n", OFFSET(inet6_ifaddr_if_list));
+	fprintf(fp, "          inet6_ifaddr_if_next: %ld\n", OFFSET(inet6_ifaddr_if_next));
+	fprintf(fp, "                in6_addr_in6_u: %ld\n", OFFSET(in6_addr_in6_u));
         fprintf(fp, "          ipv6_pinfo_rcv_saddr: %ld\n", 
 		OFFSET(ipv6_pinfo_rcv_saddr));
         fprintf(fp, "              ipv6_pinfo_daddr: %ld\n", 
@@ -10383,6 +10404,7 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(kobject_entry));
 	fprintf(fp, "                     kset_list: %ld\n",
 		OFFSET(kset_list));
+	fprintf(fp, "                     kset_kobj: %ld\n", OFFSET(kset_kobj));
 	fprintf(fp, "            request_list_count: %ld\n",
 		OFFSET(request_list_count));
 	fprintf(fp, "             request_cmd_flags: %ld\n",
@@ -10420,6 +10442,7 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "               blk_mq_tags_rqs: %ld\n",
 		OFFSET(blk_mq_tags_rqs));
 
+	fprintf(fp, "         subsys_private_subsys: %ld\n", OFFSET(subsys_private_subsys));
 	fprintf(fp, "  subsys_private_klist_devices: %ld\n",
 		OFFSET(subsys_private_klist_devices));
 	fprintf(fp, "                subsystem_kset: %ld\n",
@@ -10633,8 +10656,8 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(ktime_t_nsec));
 	fprintf(fp, "              atomic_t_counter: %ld\n",
 		OFFSET(atomic_t_counter));
-	fprintf(fp, "          percpu_counter_count: %ld\n",
-		OFFSET(percpu_counter_count));
+	fprintf(fp, "          percpu_counter_count: %ld\n", OFFSET(percpu_counter_count));
+	fprintf(fp, "       percpu_counter_counters: %ld\n", OFFSET(percpu_counter_counters));
 	fprintf(fp, "             sk_buff_head_next: %ld\n",
 		OFFSET(sk_buff_head_next));
 	fprintf(fp, "             sk_buff_head_qlen: %ld\n",
@@ -10755,6 +10778,21 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(sbq_wait_state_wait_cnt));
 	fprintf(fp, "           sbq_wait_state_wait: %ld\n",
 		OFFSET(sbq_wait_state_wait));
+	fprintf(fp, "               mm_struct_mm_mt: %ld\n", OFFSET(mm_struct_mm_mt));
+	fprintf(fp, "            maple_tree_ma_root: %ld\n", OFFSET(maple_tree_ma_root));
+	fprintf(fp, "           maple_tree_ma_flags: %ld\n", OFFSET(maple_tree_ma_flags));
+	fprintf(fp, "             maple_node_parent: %ld\n", OFFSET(maple_node_parent));
+	fprintf(fp, "               maple_node_ma64: %ld\n", OFFSET(maple_node_ma64));
+	fprintf(fp, "               maple_node_mr64: %ld\n", OFFSET(maple_node_mr64));
+	fprintf(fp, "               maple_node_slot: %ld\n", OFFSET(maple_node_slot));
+	fprintf(fp, "         maple_arange_64_pivot: %ld\n", OFFSET(maple_arange_64_pivot));
+	fprintf(fp, "          maple_arange_64_slot: %ld\n", OFFSET(maple_arange_64_slot));
+	fprintf(fp, "           maple_arange_64_gap: %ld\n", OFFSET(maple_arange_64_gap));
+	fprintf(fp, "          maple_arange_64_meta: %ld\n", OFFSET(maple_arange_64_meta));
+	fprintf(fp, "          maple_range_64_pivot: %ld\n", OFFSET(maple_range_64_pivot));
+	fprintf(fp, "           maple_range_64_slot: %ld\n", OFFSET(maple_range_64_slot));
+	fprintf(fp, "            maple_metadata_end: %ld\n", OFFSET(maple_metadata_end));
+	fprintf(fp, "            maple_metadata_gap: %ld\n", OFFSET(maple_metadata_gap));
 
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
@@ -11027,6 +11065,10 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                 sbitmap_queue: %ld\n", SIZE(sbitmap_queue));
 	fprintf(fp, "                sbq_wait_state: %ld\n", SIZE(sbq_wait_state));
 	fprintf(fp, "                   blk_mq_tags: %ld\n", SIZE(blk_mq_tags));
+	fprintf(fp, "                    maple_tree: %ld\n", SIZE(maple_tree));
+	fprintf(fp, "                    maple_node: %ld\n", SIZE(maple_node));
+
+	fprintf(fp, "                percpu_counter: %ld\n", SIZE(percpu_counter));
 
         fprintf(fp, "\n                   array_table:\n");
 	/*

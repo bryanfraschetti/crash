@@ -515,16 +515,22 @@ arm_kdump_header_adjust(int header_version)
 static int
 read_pd(int fd, off_t offset, page_desc_t *pd)
 {
-	const off_t failed = (off_t)-1;
+	int ret;
 
 	if (FLAT_FORMAT()) {
 		if (!read_flattened_format(fd, offset, pd, sizeof(*pd)))
 			return READ_ERROR;
 	} else {
-		if (lseek(fd, offset, SEEK_SET) == failed)
+		if (offset < 0) {
+			if (CRASHDEBUG(8))
+				fprintf(fp, "read_pd: invalid offset: %lx\n", offset);
 			return SEEK_ERROR;
-		if (read(fd, pd, sizeof(*pd)) != sizeof(*pd))
+		}
+		if ((ret = pread(fd, pd, sizeof(*pd), offset)) != sizeof(*pd)) {
+			if (ret == -1 && CRASHDEBUG(8))
+				fprintf(fp, "read_pd: pread error: %s\n", strerror(errno));
 			return READ_ERROR;
+		}
 	}
 
 	return 0;
@@ -621,6 +627,9 @@ restart:
 		goto err;
 	else if (STRNEQ(header->utsname.machine, "aarch64") &&
 	    machine_type_mismatch(file, "ARM64", NULL, 0))
+		goto err;
+	else if (STRNEQ(header->utsname.machine, "riscv64") &&
+	    machine_type_mismatch(file, "RISCV64", NULL, 0))
 		goto err;
 
 	if (header->block_size != block_size) {
@@ -780,6 +789,8 @@ restart:
 		dd->machine_type = EM_AARCH64;
 	else if (machine_type("SPARC64"))
 		dd->machine_type = EM_SPARCV9;
+	else if (machine_type("RISCV64"))
+		dd->machine_type = EM_RISCV;
 	else {
 		error(INFO, "%s: unsupported machine type: %s\n", 
 			DISKDUMP_VALID() ? "diskdump" : "compressed kdump",
@@ -1120,7 +1131,6 @@ cache_page(physaddr_t paddr)
 	off_t seek_offset;
 	page_desc_t pd;
 	const int block_size = dd->block_size;
-	const off_t failed = (off_t)-1;
 	ulong retlen;
 #ifdef ZSTD
 	static ZSTD_DCtx *dctx = NULL;
@@ -1185,10 +1195,18 @@ cache_page(physaddr_t paddr)
 			return PAGE_INCOMPLETE;
 		}
 	} else {
-		if (lseek(dd->dfd, pd.offset, SEEK_SET) == failed)
+		if (pd.offset < 0) {
+			if (CRASHDEBUG(8))
+				fprintf(fp, "read_diskdump/cache_page: invalid offset: %lx\n",
+					pd.offset);
 			return SEEK_ERROR;
-		if (read(dd->dfd, dd->compressed_page, pd.size) != pd.size)
+		}
+		if ((ret = pread(dd->dfd, dd->compressed_page, pd.size, pd.offset)) != pd.size) {
+			if (ret == -1 && CRASHDEBUG(8))
+				fprintf(fp, "read_diskdump/cache_page: pread error: %s\n",
+					strerror(errno));
 			return READ_ERROR;
+		}
 	}
 
 	if (pd.flags & DUMP_DH_COMPRESSED_ZLIB) {
@@ -1527,6 +1545,12 @@ get_diskdump_regs_mips(struct bt_info *bt, ulong *eip, ulong *esp)
 }
 
 static void
+get_diskdump_regs_riscv64(struct bt_info *bt, ulong *eip, ulong *esp)
+{
+	machdep->get_stack_frame(bt, eip, esp);
+}
+
+static void
 get_diskdump_regs_sparc64(struct bt_info *bt, ulong *eip, ulong *esp)
 {
 	Elf64_Nhdr *note;
@@ -1603,6 +1627,10 @@ get_diskdump_regs(struct bt_info *bt, ulong *eip, ulong *esp)
 
 	case EM_SPARCV9:
 		get_diskdump_regs_sparc64(bt, eip, esp);
+		break;
+
+	case EM_RISCV:
+		get_diskdump_regs_riscv64(bt, eip, esp);
 		break;
 
 	default:
@@ -1751,7 +1779,8 @@ dump_note_offsets(FILE *fp)
 			qemu = FALSE;
 			if (machine_type("X86_64") || machine_type("S390X") ||
 			    machine_type("ARM64") || machine_type("PPC64") ||
-			    machine_type("SPARC64") || machine_type("MIPS64")) {
+			    machine_type("SPARC64") || machine_type("MIPS64") ||
+			    machine_type("RISCV64")) {
 				note64 = (void *)dd->notes_buf + tot;
 				len = sizeof(Elf64_Nhdr);
 				if (STRNEQ((char *)note64 + len, "QEMU"))
@@ -2558,7 +2587,8 @@ dump_registers_for_compressed_kdump(void)
 	if (!KDUMP_CMPRS_VALID() || (dd->header->header_version < 4) ||
 	    !(machine_type("X86") || machine_type("X86_64") ||
 	      machine_type("ARM64") || machine_type("PPC64") ||
-	      machine_type("MIPS") || machine_type("MIPS64")))
+	      machine_type("MIPS") || machine_type("MIPS64") ||
+	      machine_type("RISCV64")))
 		error(FATAL, "-r option not supported for this dumpfile\n");
 
 	if (machine_type("ARM64") && (kt->cpus != dd->num_prstatus_notes))

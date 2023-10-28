@@ -1,12 +1,12 @@
-diff -urpN orig/extensions/eppic.mk new/extensions/eppic.mk
---- orig/extensions/eppic.mk	2021-11-23 21:32:49.000000000 -0700
-+++ new/extensions/eppic.mk	2022-02-02 09:30:55.072774926 -0700
-@@ -32,7 +32,7 @@ all:
-         then \
-         if  [ ! -f $(APPFILE) ]; \
-         then \
--          if [ -f "$(GIT)" ]; \
-+          if [ -f "$(GIT)" -a 0 -gt 1 ]; \
-           then \
-              if [ -n "$(EPPIC_GIT_URL)" ]; then \
-                git clone $(EPPIC_GIT_OPTIONS) $(EPPIC_GIT_URL) eppic; \
+diff -urpN -urpN orig/extensions/eppic.mk new/extensions/eppic.mk
+--- orig/extensions/eppic.mk	2023-04-25 19:53:15.000000000 -0600
++++ new/extensions/eppic.mk	2023-10-28 12:27:49.673513587 -0600
+@@ -35,7 +35,7 @@ all:
+ 		then \
+ 			if  [ ! -f $(APPFILE) ]; \
+ 			then \
+-				if [ -f "$(GIT)" ]; \
++				if [ -f "$(GIT)" -a 0 -gt 1 ]; \
+ 				then \
+ 					if [ -n "$(EPPIC_GIT_URL)" ]; \
+ 					then \
