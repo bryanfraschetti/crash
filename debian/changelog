@@ -1,3 +1,15 @@
+crash (8.0.3+ds1-3) unstable; urgency=medium
+
+  * New upload to resolve missing gdb
+
+ -- Troy Heber <troyh@debian.org>  Thu, 02 Nov 2023 14:23:03 -0600
+
+crash (8.0.3-2) unstable; urgency=medium
+
+  * Fix to include gdb
+
+ -- Troy Heber <troyh@debian.org>  Mon, 30 Oct 2023 09:12:36 -0600
+
 crash (8.0.3-1) unstable; urgency=medium
 
   * New upstream (Closes: #1054805)
