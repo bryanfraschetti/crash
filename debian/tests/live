@@ -19,4 +19,9 @@ elif [ "$(lsb_release -is)" = "Ubuntu" ]; then
 fi
 
 echo "Testing crash on live kernel"
-crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) 2>&1
+if crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) 2>&1 | \
+       grep "please use /proc/kcore"; then   # LP: #1858958
+    crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) /proc/kcore 2>&1
+else
+    exit $?
+fi
