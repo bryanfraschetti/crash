@@ -18,10 +18,20 @@ elif [ "$(lsb_release -is)" = "Ubuntu" ]; then
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q linux-image-$(uname -r)-dbgsym
 fi
 
+crash_out="$(mktemp)"
+cleanup() {
+    rm -f $crash_out
+}
+trap cleanup EXIT
+
 echo "Testing crash on live kernel"
-if crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) 2>&1 | \
-       grep "please use /proc/kcore"; then   # LP: #1858958
-    crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) /proc/kcore 2>&1
-else
-    exit $?
+if crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) > $crash_out 2>&1; then
+    exit 0
 fi
+ret=$?
+
+if ! grep -q "please use /proc/kcore" $crash_out; then
+    exit $ret
+fi
+echo "Retrying using /proc/kcore (LP: #1858958)"
+crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) /proc/kcore 2>&1
