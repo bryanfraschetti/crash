@@ -27,8 +27,9 @@ trap cleanup EXIT
 echo "Testing crash on live kernel"
 if crash -st /usr/lib/debug/boot/vmlinux-$(uname -r) > $crash_out 2>&1; then
     exit 0
+else
+    ret=$?
 fi
-ret=$?
 
 if ! grep -q "please use /proc/kcore" $crash_out; then
     exit $ret
