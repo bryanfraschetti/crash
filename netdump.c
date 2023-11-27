@@ -99,8 +99,11 @@ map_cpus_to_prstatus(void)
 	nrcpus = (kt->kernel_NR_CPUS ? kt->kernel_NR_CPUS : NR_CPUS);
 
 	for (i = 0, j = 0; i < nrcpus; i++) {
-		if (in_cpu_map(ONLINE_MAP, i))
+		if (in_cpu_map(ONLINE_MAP, i) && machdep->is_cpu_prstatus_valid(i)) {
 			nd->nt_prstatus_percpu[i] = nt_ptr[j++];
+			nd->num_prstatus_notes =
+				MAX(nd->num_prstatus_notes, i+1);
+		}
 	}
 
 	FREEBUF(nt_ptr);
@@ -730,6 +733,7 @@ netdump_init(char *unused, FILE *fptr)
 	if (!VMCORE_VALID())
 		return FALSE;
 
+	machdep->is_cpu_prstatus_valid = diskdump_is_cpu_prstatus_valid;
 	nd->ofp = fptr;
 
 	check_dumpfile_size(pc->dumpfile);

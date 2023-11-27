@@ -13,7 +13,8 @@ tar xvzmf gdb-10.2.tar.gz \
 	gdb-10.2/gdb/printcmd.c \
 	gdb-10.2/gdb/symfile.c \
 	gdb-10.2/gdb/Makefile.in \
-	gdb-10.2/gdb/dwarf2/read.c
+	gdb-10.2/gdb/dwarf2/read.c \
+	gdb-10.2/gdb/ada-lang.c
 
 exit 0
 
@@ -3120,3 +3121,69 @@ exit 0
    return result;
  }
  
+--- gdb-10.2/gdb/symtab.c.orig
++++ gdb-10.2/gdb/symtab.c
+@@ -7476,7 +7476,7 @@ gdb_add_symbol_file(struct gnu_request *
+         int i;
+         int allsect = 0;
+         char *secname;
+-        char buf[80];
++        char buf[96];
+ 
+         gdb_current_load_module = lm = (struct load_module *)req->addr;
+ 
+@@ -7515,8 +7515,11 @@ gdb_add_symbol_file(struct gnu_request *
+                             secname = lm->mod_section_data[i].name;
+                             if ((lm->mod_section_data[i].flags & SEC_FOUND) &&
+                                 !STREQ(secname, ".text")) {
+-                                    sprintf(buf, " -s %s 0x%lx", secname,
+-                                        lm->mod_section_data[i].offset + lm->mod_base);
++                                    if (lm->mod_section_data[i].addr)
++                                        sprintf(buf, " -s %s 0x%lx", secname, lm->mod_section_data[i].addr);
++                                    else
++                                        sprintf(buf, " -s %s 0x%lx", secname,
++                                            lm->mod_section_data[i].offset + lm->mod_base);
+                                     strcat(req->buf, buf);
+                             }
+                     }
+--- gdb-10.2/gdb/ada-lang.c.orig
++++ gdb-10.2/gdb/ada-lang.c
+@@ -1158,7 +1158,7 @@ ada_decode (const char *encoded)
+         i -= 1;
+       if (i > 1 && encoded[i] == '_' && encoded[i - 1] == '_')
+         len0 = i - 1;
+-      else if (encoded[i] == '$')
++      else if (i >= 0 && encoded[i] == '$')
+         len0 = i;
+     }
+ 
+--- gdb-10.2/gdb/coffread.c.orig
++++ gdb-10.2/gdb/coffread.c
+@@ -159,6 +159,7 @@ static long linetab_offset;
+ static unsigned long linetab_size;
+ 
+ static char *stringtab = NULL;
++static long stringtab_length = 0;
+ 
+ extern void stabsread_clear_cache (void);
+ 
+@@ -1297,6 +1298,7 @@ init_stringtab (bfd *abfd, long offset, gdb::unique_xmalloc_ptr<char> *storage)
+   /* This is in target format (probably not very useful, and not
+      currently used), not host format.  */
+   memcpy (stringtab, lengthbuf, sizeof lengthbuf);
++  stringtab_length = length;
+   if (length == sizeof length)	/* Empty table -- just the count.  */
+     return 0;
+ 
+@@ -1316,8 +1318,9 @@ getsymname (struct internal_syment *symbol_entry)
+ 
+   if (symbol_entry->_n._n_n._n_zeroes == 0)
+     {
+-      /* FIXME: Probably should be detecting corrupt symbol files by
+-         seeing whether offset points to within the stringtab.  */
++      if (symbol_entry->_n._n_n._n_offset > stringtab_length)
++        error (_("COFF Error: string table offset (%ld) outside string table (length %ld)"),
++               symbol_entry->_n._n_n._n_offset, stringtab_length);
+       result = stringtab + symbol_entry->_n._n_n._n_offset;
+     }
+   else

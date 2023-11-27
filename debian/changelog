@@ -1,3 +1,78 @@
+crash (8.0.4-1) unstable; urgency=medium
+
+  * New upstream (Closes: #1057009)
+  * a6832f608cb5 crash-8.0.3 -> crash-8.0.4
+  * 262b1c71b485 Fix printing incorrect panic string issue
+  * 55a43bcefa20 Fix compilation error and warning with gcc-4.8.5
+  * fc6ed525407f gdb: Verify COFF symbol stringtab offset
+  * a8e5e4cbae54 gdb: Avoid buffer overflow in ada_decode
+  * 0172e35083b5 Fix "rd" command to display data on zram on Linux 5.17 and
+    later
+  * ac097d6cb157 diskdump: add hook for additional checks on prstatus notes
+    validity
+  * 5e758aaa0fd8 Make "clear" external command runnable without "!" and
+    alias-able
+  * 578fc08b8255 memory_driver: Support overriding kernel directory
+  * 1cfd513ea9c8 memory_driver: Use designated initializer for 'crash_dev'
+  * 3c44056efef2 memory_driver: Ensure PWD points to the current directory
+  * c9a732d0f6ab arm64: Fix "vtop" command to display swap information on
+    Linux 5.19 and later
+  * a9291fc1bf61 ppc64: do page traversal if vmemmap_list not populated
+  * 27f3ccd6c296 In verify_version() don't require specific syment type values
+    for linux_banner symbol to get its address
+  * 3253e5ac87c6 Fix "ps/vm" commands to display the memory usage for exiting
+    tasks
+  * 1aa93cd33fa1 RISCV64: Add KASLR support
+  * f774fe0f59b4 deduplicate kernel_version open-coded parser
+  * eeaed479a438 Fix "kmem -s|-S" not working properly when
+    CONFIG_SLAB_FREELIST_HARDENED is enabled
+  * bc145861bfeb Revert "Fix "kmem -s|-S" not working properly on RHEL8.6 and
+    later"
+  * ff963b795b3f RISCV64: Use va_kernel_pa_offset in VTOP()
+  * 69f38d777450 Fix "ps/vm" commands to display correct memory usage
+  * 558aecc98987 Fix "foreach" command with "DE" state to display only
+    expected tasks
+  * c74f375e0ef7 Fix get_linux_banner_from_vmlinux() for vmlinux without
+    ".rodata" symbol
+  * aa5763800d61 Fix warning about kernel version inconsistency during crash
+    startup
+  * f0b59524624b Fix segmentation fault by "tree -s" option with Maple Tree
+  * 38d35bd1423c Fix "irq [-a|-s]" options on Linux 6.5-rc1 and later
+  * d17d51a92a3a Exclude zero entries from do_maple_tree() return value
+  * b76e116c50ff vmware: Improve output when we fail to read vmware 'vmsn'
+    file
+  * 6d0be1316aa3 Fix "irq -a" option on Linux 6.0 and later
+  * 4ee56105881d Fix compilation error due to new strlcpy function that glibc
+    added
+  * 88580068b7dd Fix failure of gathering task table on Linux 6.5-rc1 and
+    later
+  * 7750e61fdb2a Support module memory layout change on Linux 6.4
+  * 8b24b2025fb4 ppc64: Remove redundant PTE checks
+  * 6c8cd9b5dcf4 arm64: Fix again segfault in
+    arm64_is_kernel_exception_frame() when corrupt stack pointer address is
+    given
+  * 91a76958e4a8 Revert "Fix segfault in arm64_is_kernel_exception_frame()
+    when corrupt stack pointer address is given"
+  * ec1e61b33a70 Fix invalid structure size error during crash startup on
+    ppc64
+  * 77d8621876c1 x86_64: Fix "bt" command printing stale entries on Linux 6.4
+    and later
+  * 8527bbff71cb Output prompt when stdin is not a TTY
+  * 9868ebc8e648 Fix segfault in arm64_is_kernel_exception_frame() when
+    corrupt stack pointer address is given
+  * db8c030857b4 diskdump/netdump: fix segmentation fault caused by failure of
+    stopping CPUs
+  * a0eceb041dfa arm64/x86_64: Enhance "vtop" command to show zero_pfn
+    information
+  * 342cf340ed03 Fix "kmem -v" option displaying no regions on Linux 6.3 and
+    later
+  * 58c1816521c2 Fix failure of "dev -d|-D" options on Linux 6.4 and later
+    kernels
+  * 040a56e9f9d0 Fix kernel version macros for revision numbers over 255
+  * 2505a65ff547 Mark start of 8.0.4 development phase with version 8.0.3++
+
+ -- Troy Heber <troyh@debian.org>  Mon, 27 Nov 2023 14:43:03 -0700
+
 crash (8.0.3+ds1-3) unstable; urgency=medium
 
   * New upload to resolve missing gdb

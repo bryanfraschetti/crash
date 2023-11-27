@@ -320,7 +320,6 @@ static void dump_per_cpu_offsets(void);
 static void dump_page_flags(ulonglong);
 static ulong kmem_cache_nodelists(ulong);
 static void dump_hstates(void);
-static void freelist_ptr_init(void);
 static ulong freelist_ptr(struct meminfo *, ulong, ulong);
 static ulong handle_each_vm_area(struct handle_each_vm_area_args *);
 
@@ -429,6 +428,7 @@ vm_init(void)
 	MEMBER_OFFSET_INIT(vmap_area_vm, "vmap_area", "vm");
 	if (INVALID_MEMBER(vmap_area_vm))
 		MEMBER_OFFSET_INIT(vmap_area_vm, "vmap_area", "private");
+	MEMBER_OFFSET_INIT(vmap_area_purge_list, "vmap_area", "purge_list");
 	STRUCT_SIZE_INIT(vmap_area, "vmap_area");
 	if (VALID_MEMBER(vmap_area_va_start) &&
 	    VALID_MEMBER(vmap_area_va_end) &&
@@ -790,8 +790,6 @@ vm_init(void)
 		MEMBER_OFFSET_INIT(kmem_cache_name, "kmem_cache", "name");
 		MEMBER_OFFSET_INIT(kmem_cache_flags, "kmem_cache", "flags");
 		MEMBER_OFFSET_INIT(kmem_cache_random, "kmem_cache", "random");
-		if (VALID_MEMBER(kmem_cache_random))
-			freelist_ptr_init();
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_freelist, "kmem_cache_cpu", "freelist");
 		MEMBER_OFFSET_INIT(kmem_cache_cpu_page, "kmem_cache_cpu", "page");
 		if (INVALID_MEMBER(kmem_cache_cpu_page))
@@ -1207,6 +1205,27 @@ vm_init(void)
 		MAX((uint64_t)vt->max_mapnr * PAGESIZE(), 
 		machdep->memory_size()));
 	vt->paddr_prlen = strlen(buf);
+
+	vt->zero_paddr = ~0UL;
+	if (kernel_symbol_exists("zero_pfn")) {
+		ulong zero_pfn;
+
+		if (readmem(symbol_value("zero_pfn"), KVADDR,
+			    &zero_pfn, sizeof(zero_pfn),
+			    "read zero_pfn", QUIET|RETURN_ON_ERROR))
+			vt->zero_paddr = zero_pfn << PAGESHIFT();
+	}
+
+	vt->huge_zero_paddr = ~0UL;
+	if (kernel_symbol_exists("huge_zero_pfn")) {
+		ulong huge_zero_pfn;
+
+		if (readmem(symbol_value("huge_zero_pfn"), KVADDR,
+			    &huge_zero_pfn, sizeof(huge_zero_pfn),
+			    "read huge_zero_pfn", QUIET|RETURN_ON_ERROR) &&
+		    huge_zero_pfn != ~0UL)
+			vt->huge_zero_paddr = huge_zero_pfn << PAGESHIFT();
+	}
 
 	if (vt->flags & PERCPU_KMALLOC_V1) 
                 vt->dump_kmem_cache = dump_kmem_cache_percpu_v1;
@@ -4444,13 +4463,13 @@ in_user_stack(ulong task, ulong vaddr)
 }
 
 /*
- * Set the const value of filepages and anonpages 
- * according to MM_FILEPAGES and MM_ANONPAGES.
+ * Set the const value of filepages, anonpages and shmempages
+ * according to MM_FILEPAGES, MM_ANONPAGES and MM_SHMEMPAGES.
  */
 static void 
 rss_page_types_init(void)
 {
-	long anonpages, filepages;
+	long anonpages, filepages, shmempages;
 
 	if (VALID_MEMBER(mm_struct_rss))
 		return;
@@ -4465,6 +4484,15 @@ rss_page_types_init(void)
 		}
 		tt->filepages = filepages;
 		tt->anonpages = anonpages;
+
+		/*
+		 * The default value(MM_SHMEMPAGES) is 3, which is introduced
+		 * in linux v4.5-rc1 and later. See commit eca56ff906bd.
+		 */
+		if (!enumerator_value("MM_SHMEMPAGES", &shmempages))
+			tt->shmempages = -1;
+		else
+			tt->shmempages = shmempages;
 	}
 }
 
@@ -4764,10 +4792,11 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 {
 	struct task_context *tc;
 	long rss = 0, rss_cache = 0;
+	int mm_count = 0;
 
 	BZERO(tm, sizeof(struct task_mem_usage));
 
-	if (IS_ZOMBIE(task) || IS_EXITING(task)) 
+	if (IS_ZOMBIE(task))
 		return;
 
 	tc = task_to_context(task);
@@ -4780,6 +4809,11 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 	if (!task_mm(task, TRUE))
 		return;
 
+	mm_count = INT(tt->mm_struct + OFFSET(mm_struct_mm_count));
+
+	if (IS_EXITING(task) && mm_count <= 0)
+		return;
+
 	if (VALID_MEMBER(mm_struct_rss))
 		/*  
 		 *  mm_struct.rss or mm_struct._rss exist. 
@@ -4790,10 +4824,11 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 		 *  Latest kernels have mm_struct.mm_rss_stat[].
 		 */ 
 		if (VALID_MEMBER(mm_struct_rss_stat) && VALID_MEMBER(mm_rss_stat_count)) {
-			long anonpages, filepages, count;
+			long anonpages, filepages, shmempages, count;
 
 			anonpages = tt->anonpages;
 			filepages = tt->filepages;
+			shmempages = tt->shmempages;
 			count = LONG(tt->mm_struct +
 				OFFSET(mm_struct_rss_stat) +
 				OFFSET(mm_rss_stat_count) +
@@ -4814,6 +4849,15 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 			if (count > 0)
 				rss += count;
 
+			if (shmempages > 0) {
+				count = LONG(tt->mm_struct +
+					OFFSET(mm_struct_rss_stat) +
+					OFFSET(mm_rss_stat_count) +
+					(shmempages * sizeof(long)));
+				if (count > 0)
+					rss += count;
+			}
+
 		} else if (VALID_MEMBER(mm_struct_rss_stat)) {
 			/* 6.2: struct percpu_counter rss_stat[NR_MM_COUNTERS] */
 			ulong fbc;
@@ -4824,6 +4868,10 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 
 			fbc = tc->mm_struct + OFFSET(mm_struct_rss_stat) +
 				(tt->anonpages * SIZE(percpu_counter));
+			rss += percpu_counter_sum_positive(fbc);
+
+			fbc = tc->mm_struct + OFFSET(mm_struct_rss_stat) +
+				(tt->shmempages * SIZE(percpu_counter));
 			rss += percpu_counter_sum_positive(fbc);
 		}
 
@@ -4858,12 +4906,11 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 				if (ACTIVE() || last->rss_cache == UNINITIALIZED) {
 					while (first <= last)
 					{
+						ulong addr = first->task + OFFSET(task_struct_rss_stat) +
+								OFFSET(task_rss_stat_count);
+
 						/* count 0 -> filepages */
-						if (!readmem(first->task +
-							OFFSET(task_struct_rss_stat) +
-							OFFSET(task_rss_stat_count), KVADDR,
-							&sync_rss,
-							sizeof(int),
+						if (!readmem(addr, KVADDR, &sync_rss, sizeof(int),
 							"task_struct rss_stat MM_FILEPAGES",
 							RETURN_ON_ERROR))
 								continue;
@@ -4872,18 +4919,25 @@ get_task_mem_usage(ulong task, struct task_mem_usage *tm)
 							rss_cache += sync_rss;
 
 						/* count 1 -> anonpages */
-						if (!readmem(first->task +
-							OFFSET(task_struct_rss_stat) +
-							OFFSET(task_rss_stat_count) +
-							sizeof(int),
-							KVADDR, &sync_rss,
-							sizeof(int),
+						if (!readmem(addr + sizeof(int), KVADDR, &sync_rss, sizeof(int),
 							"task_struct rss_stat MM_ANONPAGES",
 							RETURN_ON_ERROR))
 								continue;
 
 						if (sync_rss > 0)
 							rss_cache += sync_rss;
+
+						/* count 3 -> shmempages */
+						if (tt->shmempages >= 0) {
+							if (!readmem(addr + tt->shmempages * sizeof(int), KVADDR,
+								&sync_rss, sizeof(int),
+								"task_struct rss_stat MM_SHMEMPAGES",
+								RETURN_ON_ERROR))
+									continue;
+
+							if (sync_rss > 0)
+								rss_cache += sync_rss;
+						}
 
 						if (first == last)
 							break;
@@ -9063,7 +9117,8 @@ dump_vmap_area(struct meminfo *vi)
 		readmem(ld->list_ptr[i], KVADDR, vmap_area_buf,
                         SIZE(vmap_area), "vmap_area struct", FAULT_ON_ERROR); 
 
-		if (VALID_MEMBER(vmap_area_flags)) {
+		if (VALID_MEMBER(vmap_area_flags) &&
+		    VALID_MEMBER(vmap_area_purge_list)) {
 			flags = ULONG(vmap_area_buf + OFFSET(vmap_area_flags));
 			if (flags != VM_VM_AREA)
 				continue;
@@ -13942,8 +13997,6 @@ dump_vm_table(int verbose)
 		fprintf(fp, "%sSLAB_CPU_CACHE", others++ ? "|" : "");\
 	if (vt->flags & SLAB_ROOT_CACHES)
 		fprintf(fp, "%sSLAB_ROOT_CACHES", others++ ? "|" : "");\
-	if (vt->flags & FREELIST_PTR_BSWAP)
-		fprintf(fp, "%sFREELIST_PTR_BSWAP", others++ ? "|" : "");\
 	if (vt->flags & USE_VMAP_AREA)
 		fprintf(fp, "%sUSE_VMAP_AREA", others++ ? "|" : "");\
 	if (vt->flags & CONFIG_NUMA)
@@ -14063,6 +14116,8 @@ dump_vm_table(int verbose)
 	} else {
 		fprintf(fp, "    node_online_map: (unused)\n");
 	}
+	fprintf(fp, "         zero_paddr: %lx\n", vt->zero_paddr);
+	fprintf(fp, "    huge_zero_paddr: %lx\n", vt->huge_zero_paddr);
 	fprintf(fp, "   nr_vm_stat_items: %d\n", vt->nr_vm_stat_items);
 	fprintf(fp, "      vm_stat_items: %s", (vt->flags & VM_STAT) ?
 		"\n" : "(not used)\n");
@@ -15687,10 +15742,44 @@ in_vmlist_segment(ulong vaddr)
 static int
 next_module_vaddr(ulong vaddr, ulong *nextvaddr)
 {
-	int i;
-	ulong start, end;
+	int i, t;
+	ulong start, end, min = (ulong)-1;
 	struct load_module *lm;
 
+	if (!MODULE_MEMORY())
+		goto old_module;
+
+	for (i = 0; i < st->mods_installed; i++) {
+		lm = &st->load_modules[i];
+
+		for_each_mod_mem_type(t) {
+			if (!lm->mem[t].size)
+				continue;
+
+			start = lm->mem[t].base;
+			end = start + lm->mem[t].size;
+
+			if (vaddr >= end)
+				continue;
+
+			if (vaddr < start) {
+				if (start < min) /* replace candidate */
+					min = start;
+				continue;
+			}
+
+			*nextvaddr = vaddr;
+			return TRUE;
+		}
+	}
+
+	if (min != (ulong)-1) {
+		*nextvaddr = min;
+		return TRUE;
+	}
+	return FALSE;
+
+old_module:
 	for (i = 0; i < st->mods_installed; i++) {
 		lm = &st->load_modules[i];
 		start = lm->mod_base;
@@ -17865,38 +17954,9 @@ init_memory_block(int *klistcnt, ulong **klistbuf)
 	 * v6.3-rc1
 	 * d2bf38c088e0 driver core: remove private pointer from struct bus_type
 	 */
-	if (INVALID_MEMBER(bus_type_p)) {
-		int i, cnt;
-		char buf[32];
-		ulong bus_kset, list, name;
-
-		BZERO(ld, sizeof(struct list_data));
-
-		get_symbol_data("bus_kset", sizeof(ulong), &bus_kset);
-		readmem(bus_kset + OFFSET(kset_list), KVADDR, &list,
-			sizeof(ulong), "bus_kset.list", FAULT_ON_ERROR);
-
-		ld->flags |= LIST_ALLOCATE;
-		ld->start = list;
-		ld->end = bus_kset + OFFSET(kset_list);
-		ld->list_head_offset = OFFSET(kobject_entry);
-
-		cnt = do_list(ld);
-		for (i = 0; i < cnt; i++) {
-			readmem(ld->list_ptr[i] + OFFSET(kobject_name), KVADDR, &name,
-				sizeof(ulong), "kobject.name", FAULT_ON_ERROR);
-			read_string(name, buf, sizeof(buf)-1);
-			if (CRASHDEBUG(1))
-				fprintf(fp, "kobject: %lx name: %s\n", ld->list_ptr[i], buf);
-			if (STREQ(buf, "memory")) {
-				/* entry is subsys_private.subsys.kobj. See bus_to_subsys(). */
-				private = ld->list_ptr[i] - OFFSET(kset_kobj)
-						- OFFSET(subsys_private_subsys);
-				break;
-			}
-		}
-		FREEBUF(ld->list_ptr);
-	} else {
+	if (INVALID_MEMBER(bus_type_p))
+		private = get_subsys_private("bus_kset", "memory");
+	else {
 		ulong memory_subsys = symbol_value("memory_subsys");
 		readmem(memory_subsys + OFFSET(bus_type_p), KVADDR, &private,
 			sizeof(void *), "memory_subsys.private", FAULT_ON_ERROR);
@@ -19623,57 +19683,18 @@ count_free_objects(struct meminfo *si, ulong freelist)
 	return c;
 }
 
-/*
- * With CONFIG_SLAB_FREELIST_HARDENED, freelist_ptr's are crypted with xor's,
- * and for recent release with an additionnal bswap. Some releases prio to 5.7.0
- * may be using the additionnal bswap. The only easy and reliable way to tell is
- * to inspect assembly code (eg. "__slab_free") for a bswap instruction.
- */
-static int
-freelist_ptr_bswap_x86(void)
-{
-	char buf1[BUFSIZE];
-	char buf2[BUFSIZE];
-	char *arglist[MAXARGS];
-	int found;
-
-	sprintf(buf1, "disassemble __slab_free");
-	open_tmpfile();
-	if (!gdb_pass_through(buf1, pc->tmpfile, GNU_RETURN_ON_ERROR)) {
-		close_tmpfile();
-		return FALSE;
-	}
-	rewind(pc->tmpfile);
-	found = FALSE;
-	while (fgets(buf2, BUFSIZE, pc->tmpfile)) {
-		if (parse_line(buf2, arglist) < 3)
-			continue;
-		if (STREQ(arglist[2], "bswap")) {
-			found = TRUE;
-			break;
-		}
-	}
-	close_tmpfile();
-	return found;
-}
-
-static void
-freelist_ptr_init(void)
-{
-	if (THIS_KERNEL_VERSION >= LINUX(5,7,0) ||
-	    ((machine_type("X86_64") || machine_type("X86")) && freelist_ptr_bswap_x86()))
-		vt->flags |= FREELIST_PTR_BSWAP;
-}
-
 static ulong
 freelist_ptr(struct meminfo *si, ulong ptr, ulong ptr_addr)
 {
 	if (VALID_MEMBER(kmem_cache_random)) {
 		/* CONFIG_SLAB_FREELIST_HARDENED */
 
-		if (vt->flags & FREELIST_PTR_BSWAP)
-			ptr_addr = (sizeof(long) == 8) ? bswap_64(ptr_addr)
-						       : bswap_32(ptr_addr);
+		ulong addr = (sizeof(long) == 8) ? bswap_64(ptr_addr) : bswap_32(ptr_addr);
+		addr = ptr ^ si->random ^ addr;
+
+		if (!addr || accessible(addr))
+			return addr;
+
 		return (ptr ^ si->random ^ ptr_addr);
 	} else
 		return ptr;
