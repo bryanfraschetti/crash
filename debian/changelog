@@ -1,3 +1,19 @@
+crash (8.0.4-1ubuntu1) noble; urgency=medium
+
+  * Merge with Debian unstable. Remaining changes:
+d/t/live: If the "live" autopkgtest fails with a recommendation to try /proc/kcore instead of the default, attempt that before failing the test. LP #1858958.
+[7.2.6-1ubuntu1]
+d/t/live: Fix logic issue in "live" autopkgtest introduced in the last upload.
+[7.2.6-1ubuntu2]
+d/t/live: Fix test, as if will return 0 when no cases were true.
+[7.2.8-1ubuntu1]
+d/t/control: Add linux-libc-dev dependency for the autopkg test. This package gets usually broken with kernel upgrades, so let it already show in the autopkg test.
+[7.2.9-2ubuntu3]
+d/t/control: Run autopkg test with allow-stderr.
+[8.0.0-1ubuntu1]
+
+ -- Mauricio Faria de Oliveira <mfo@canonical.com>  Tue, 02 Jan 2024 19:09:28 -0300
+
 crash (8.0.4-1) unstable; urgency=medium
 
   * New upstream (Closes: #1057009)
