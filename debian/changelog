@@ -73,6 +73,31 @@ crash (8.0.4-1) unstable; urgency=medium
 
  -- Troy Heber <troyh@debian.org>  Mon, 27 Nov 2023 14:43:03 -0700
 
+crash (8.0.3+ds1-3ubuntu1) noble; urgency=medium
+
+  * Merge with Debian unstable. Remaining changes: (LP: #2042357)
+    - d/t/live: If the "live" autopkgtest fails with a recommendation to
+      try /proc/kcore instead of the default, attempt that before
+      failing the test. LP 1858958.
+    - d/t/live: Fix logic issue in "live" autopkgtest introduced in the
+      last upload.
+    - d/t/live: Fix test, as if will return 0 when no cases were true.
+    - d/t/control: Add linux-libc-dev dependency for the autopkg test.
+      This package gets usually broken with kernel upgrades, so let it
+      already show in the autopkg test.
+    - d/t/control: Run autopkg test with allow-stderr.
+  * Drop changes:
+    - d/rules: Build without lto. Fails to build gdb on ppc64el. That
+      should be fixed, once gdb is updated to a more recent version
+      (e.g. 10.x). [This line is already commented out since Mantic.]
+  * New changes:
+    - d/p/0002-Fix-compilation-error-due-to-new-strlcpy-function.patch:
+      Fix FTBFS due to strlcpy() introduced in glibc 2.38.
+    - d/p/0003-Support-module-memory-layout-change-on-Linux-6.4.patch:
+      Fix fatal 'crash: invalid structure member offset: module_core_size'
+
+ -- Mauricio Faria de Oliveira <mfo@canonical.com>  Tue, 07 Nov 2023 15:00:36 -0300
+
 crash (8.0.3+ds1-3) unstable; urgency=medium
 
   * New upload to resolve missing gdb
@@ -91,6 +116,16 @@ crash (8.0.3-1) unstable; urgency=medium
   * https://github.com/crash-utility/crash/compare/8.0.2...8.0.3
 
  -- Troy Heber <troyh@debian.org>  Sat, 28 Oct 2023 12:21:36 -0600
+
+crash (8.0.2-1ubuntu1) mantic; urgency=medium
+
+  * Merge with Debian; remaining changes:
+    - Add linux-libc-dev dependency for the autopkg test. This package
+      gets usually broken with kernel upgrades, so let it already show
+      in the autopkg test.
+    - Run autopkg test with allow-stderr.
+
+ -- Matthias Klose <doko@ubuntu.com>  Thu, 06 Jul 2023 16:49:16 +0200
 
 crash (8.0.2-1) unstable; urgency=medium
   * New upstream
@@ -2242,6 +2277,18 @@ crash (8.0.1-1) UNRELEASED; urgency=medium
 
  -- Troy Heber <troyh@debian.org>  Thu, 17 Nov 2022 10:27:25 -0700
 
+crash (8.0.0-1ubuntu1) jammy; urgency=medium
+
+  * Merge with Debian; remaining changes:
+    - Build without lto. Fails to build gdb on ppc64el. That should be fixed,
+      once gdb is updated to a more recent version (e.g. 10.x).
+    - Add linux-libc-dev dependency for the autopkg test. This package
+      gets usually broken with kernel upgrades, so let it already show
+      in the autopkg test.
+  * Run autopkg test with allow-stderr.
+
+ -- Matthias Klose <doko@ubuntu.com>  Wed, 23 Mar 2022 15:07:01 +0100
+
 crash (8.0.0-1) unstable; urgency=medium
   * New upstream (Closes: #950544)
   * Add lintian override for zlib in embedded gdb
@@ -3374,6 +3421,17 @@ crash (8.0.0-1) unstable; urgency=medium
 
  -- Troy Heber <troyh@debian.org>  Wed, 02 Feb 2022 09:19:00 -0700
 
+crash (7.3.0-1ubuntu1) impish; urgency=medium
+
+  * Merge with Debian; remaining changes:
+    - Build without lto. Fails to build gdb on ppc64el. That should be fixed,
+      once gdb is updated to a more recent version (e.g. 10.x).
+    - Add linux-libc-dev dependency for the autopkg test. This package
+      gets usually broken with kernel upgrades, so let it already show
+      in the autopkg test.
+
+ -- dann frazier <dann.frazier@canonical.com>  Thu, 08 Jul 2021 09:16:21 -0600
+
 crash (7.3.0-1) experimental; urgency=medium
 
   * Add support for new lockless righbuffer that Linux 5.10 introduced.
@@ -3554,6 +3612,27 @@ crash (7.3.0-1) experimental; urgency=medium
     Without the patch, the HZ value can be set to a hardcorded wrong value.
 
  -- Troy Heber <troyh@debian.org>  Wed, 07 Jul 2021 15:31:12 -0600
+
+crash (7.2.9-2ubuntu3) impish; urgency=medium
+
+  * Add linux-libc-dev dependency for the autopkg test. This package
+    gets usually broken with kernel upgrades, so let it already show
+    in the autopkg test.
+
+ -- Matthias Klose <doko@ubuntu.com>  Mon, 21 Jun 2021 09:54:43 +0200
+
+crash (7.2.9-2ubuntu2) hirsute; urgency=medium
+
+  * Build without lto. Fails to build gdb on ppc64el. That should be fixed,
+    once gdb is updated to a more recent version (e.g. 10.x).
+
+ -- Matthias Klose <doko@ubuntu.com>  Thu, 25 Mar 2021 10:04:06 +0100
+
+crash (7.2.9-2ubuntu1) hirsute; urgency=medium
+
+  * Merge with Debian; remaining changes:
+
+ -- Matthias Klose <doko@ubuntu.com>  Thu, 25 Mar 2021 09:08:04 +0100
 
 crash (7.2.9-2) unstable; urgency=medium
 
@@ -3809,6 +3888,17 @@ crash (7.2.9-1) unstable; urgency=medium
     initialization.  With the patch applied, it only takes about 5-10 minutes.
 
  -- Troy Heber <troyh@debian.org>  Thu, 03 Dec 2020 09:53:49 -0700
+
+crash (7.2.8-1ubuntu1) focal; urgency=low
+
+  * Merge from Debian unstable.  Remaining changes:
+    - Update the maintainer field for Ubuntu.
+    - If the "live" autopkgtest fails with a recommendation to try
+      /proc/kcore instead of the default, attempt that before failing
+      the test. LP: #1858958.
+  * Fix test, as if will return 0 when no cases were true.
+
+ -- Thadeu Lima de Souza Cascardo <cascardo@canonical.com>  Wed, 12 Feb 2020 22:12:51 +0000
 
 crash (7.2.8-1) unstable; urgency=medium
 
@@ -4138,6 +4228,40 @@ crash (7.2.7-1) UNRELEASED; urgency=medium
     in-kernel configuration data if it exists (3) the default value
 
  -- Troy Heber <troyh@debian.org>  Tue, 11 Feb 2020 19:19:28 -0700
+
+crash (7.2.6-1ubuntu4) focal; urgency=medium
+
+  * No-change rebuild with fixed binutils on arm64.
+
+ -- Matthias Klose <doko@ubuntu.com>  Sat, 08 Feb 2020 10:57:37 +0000
+
+crash (7.2.6-1ubuntu3) focal; urgency=medium
+
+  * Rebuild with updated binutils, fixing an "illegal insruction" crash
+    on arm64. LP: #1859226.
+  * Update the maintainer field for Ubuntu.
+
+ -- dann frazier <dannf@ubuntu.com>  Sat, 11 Jan 2020 09:36:27 -0700
+
+crash (7.2.6-1ubuntu2) focal; urgency=medium
+
+  * Fix logic issue in "live" autopkgtest introduced in the last upload.
+
+ -- dann frazier <dannf@ubuntu.com>  Thu, 09 Jan 2020 19:24:17 -0700
+
+crash (7.2.6-1ubuntu1) focal; urgency=medium
+
+  * If the "live" autopkgtest fails with a recommendation to try
+    /proc/kcore instead of the default, attempt that before failing
+    the test. LP: #1858958.
+
+ -- dann frazier <dannf@ubuntu.com>  Thu, 09 Jan 2020 14:21:45 -0700
+
+crash (7.2.6-1build1) eoan; urgency=medium
+
+  * No-change upload with strops.h and sys/strops.h removed in glibc.
+
+ -- Matthias Klose <doko@ubuntu.com>  Thu, 05 Sep 2019 10:47:07 +0000
 
 crash (7.2.6-1) unstable; urgency=medium
 
