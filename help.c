@@ -215,6 +215,8 @@ char *program_usage_info[] = {
     "    Dump the contents of the kernel log buffer.  A kernel namelist",
     "    argument is not necessary, but the dumpfile must contain the",
     "    VMCOREINFO data taken from the original /proc/vmcore ELF header.",
+    "    Note: this option is deprecated and will no longer work for",
+    "    kernel(>=v5.10).",
     "",
     "  --no_kallsyms",
     "    Do not use kallsyms-generated symbol information contained within",
@@ -8511,7 +8513,7 @@ display_version(void)
 static 
 char *version_info[] = {
 
-"Copyright (C) 2002-2024  Red Hat, Inc.",
+"Copyright (C) 2002-2025  Red Hat, Inc.",
 "Copyright (C) 2004, 2005, 2006, 2010  IBM Corporation", 
 "Copyright (C) 1999-2006  Hewlett-Packard Co",
 "Copyright (C) 2005, 2006, 2011, 2012  Fujitsu Limited",

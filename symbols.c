@@ -619,9 +619,9 @@ strip_symbol_end(const char *name, char *buf)
  *  or in /proc/kallsyms on a live system.
  *
  *  Setting KASLR_CHECK will trigger a search for "module_load_offset"
- *  during the initial symbol sort operation, and if found, will
- *  set (RELOC_AUTO|KASLR).  On live systems, the search is done
- *  here by checking /proc/kallsyms.
+ *  or "kaslr_get_random_long" during the initial symbol sort operation, and
+ *  if found, will set (RELOC_AUTO|KASLR).  On live systems, the search
+ *  is done here by checking /proc/kallsyms.
  */
 static void
 kaslr_init(void)
@@ -646,7 +646,8 @@ kaslr_init(void)
 		st->_stext_vmlinux = UNINITIALIZED;
 
 	if (ACTIVE() &&   /* Linux 3.15 */
-	    (symbol_value_from_proc_kallsyms("module_load_offset") != BADVAL)) {
+	    ((symbol_value_from_proc_kallsyms("kaslr_get_random_long") != BADVAL) ||
+	    (symbol_value_from_proc_kallsyms("module_load_offset") != BADVAL))) {
 		kt->flags2 |= (RELOC_AUTO|KASLR);
 		st->_stext_vmlinux = UNINITIALIZED;
 	}
@@ -10167,6 +10168,8 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "               vmap_area_flags: %ld\n", 
 		OFFSET(vmap_area_flags));
 	fprintf(fp, "          vmap_area_purge_list: %ld\n", OFFSET(vmap_area_purge_list));
+	fprintf(fp, "                vmap_node_busy: %ld\n", OFFSET(vmap_node_busy));
+	fprintf(fp, "                  rb_list_head: %ld\n", OFFSET(rb_list_head));
 
 	fprintf(fp, "         module_size_of_struct: %ld\n", 
 		OFFSET(module_size_of_struct));
@@ -10336,6 +10339,8 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "            page_compound_head: %ld\n",
                 OFFSET(page_compound_head));
         fprintf(fp, "                  page_private: %ld\n", OFFSET(page_private));
+	fprintf(fp, "                page_page_type: %ld\n",
+		OFFSET(page_page_type));
 
 	fprintf(fp, "        trace_print_flags_mask: %ld\n",
 		OFFSET(trace_print_flags_mask));
@@ -10519,6 +10524,7 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(file_f_count));
         fprintf(fp, "                   file_f_path: %ld\n", 
 		OFFSET(file_f_path));
+        fprintf(fp, "                  file_f_inode: %ld\n", OFFSET(file_f_inode));
         fprintf(fp, "                      path_mnt: %ld\n", 
 		OFFSET(path_mnt));
         fprintf(fp, "                   path_dentry: %ld\n", 
@@ -11809,6 +11815,20 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "            zs_pool_size_class: %ld\n", OFFSET(zs_pool_size_class));
 	fprintf(fp, "               size_class_size: %ld\n", OFFSET(size_class_size));
 	fprintf(fp, "                   zspage_huge: %ld\n", OFFSET(zspage_huge));
+	fprintf(fp, "       inactive_task_frame_r15: %ld\n", OFFSET(inactive_task_frame_r15));
+	fprintf(fp, "       inactive_task_frame_r14: %ld\n", OFFSET(inactive_task_frame_r14));
+	fprintf(fp, "       inactive_task_frame_r13: %ld\n", OFFSET(inactive_task_frame_r13));
+	fprintf(fp, "       inactive_task_frame_r12: %ld\n", OFFSET(inactive_task_frame_r12));
+	fprintf(fp, "     inactive_task_frame_flags: %ld\n", OFFSET(inactive_task_frame_flags));
+	fprintf(fp, "        inactive_task_frame_si: %ld\n", OFFSET(inactive_task_frame_si));
+	fprintf(fp, "        inactive_task_frame_di: %ld\n", OFFSET(inactive_task_frame_di));
+	fprintf(fp, "        inactive_task_frame_bx: %ld\n", OFFSET(inactive_task_frame_bx));
+	fprintf(fp, "              thread_struct_es: %ld\n", OFFSET(thread_struct_es));
+	fprintf(fp, "              thread_struct_ds: %ld\n", OFFSET(thread_struct_ds));
+	fprintf(fp, "          thread_struct_fsbase: %ld\n", OFFSET(thread_struct_fsbase));
+	fprintf(fp, "          thread_struct_gsbase: %ld\n", OFFSET(thread_struct_gsbase));
+	fprintf(fp, "              thread_struct_fs: %ld\n", OFFSET(thread_struct_fs));
+	fprintf(fp, "              thread_struct_gs: %ld\n", OFFSET(thread_struct_gs));
 
 	fprintf(fp, "\n                    size_table:\n");
 	fprintf(fp, "                          page: %ld\n", SIZE(page));
@@ -11847,6 +11867,7 @@ dump_offset_table(char *spec, ulong makestruct)
         fprintf(fp, "             task_struct_flags: %ld\n", SIZE(task_struct_flags));
         fprintf(fp, "            task_struct_policy: %ld\n", SIZE(task_struct_policy));
         fprintf(fp, "                   thread_info: %ld\n", SIZE(thread_info));
+        fprintf(fp, "                    fred_frame: %ld\n", SIZE(fred_frame));
         fprintf(fp, "                 softirq_state: %ld\n", 
 		SIZE(softirq_state));
         fprintf(fp, "                softirq_action: %ld\n", 
@@ -12040,6 +12061,7 @@ dump_offset_table(char *spec, ulong makestruct)
 		SIZE(task_group));
 	fprintf(fp, "                     vmap_area: %ld\n",
 		SIZE(vmap_area));
+	fprintf(fp, "                     vmap_node: %ld\n", SIZE(vmap_node));
 	fprintf(fp, "            hrtimer_clock_base: %ld\n",
 		SIZE(hrtimer_clock_base));
 	fprintf(fp, "                  hrtimer_base: %ld\n",
@@ -12086,6 +12108,7 @@ dump_offset_table(char *spec, ulong makestruct)
 	fprintf(fp, "                    maple_node: %ld\n", SIZE(maple_node));
 
 	fprintf(fp, "                percpu_counter: %ld\n", SIZE(percpu_counter));
+	fprintf(fp, "                     cpumask_t: %ld\n", SIZE(cpumask_t));
 
         fprintf(fp, "\n                   array_table:\n");
 	/*
@@ -14247,7 +14270,9 @@ numeric_forward(const void *P_x, const void *P_y)
 			st->_stext_vmlinux = valueof(y);
 	}
 	if (kt->flags2 & KASLR_CHECK) {
-		if (STREQ(x->name, "module_load_offset") || 
+		if (STREQ(x->name, "kaslr_get_random_long") ||
+		    STREQ(y->name, "kaslr_get_random_long") ||
+		    STREQ(x->name, "module_load_offset") ||
 		    STREQ(y->name, "module_load_offset")) {
 			kt->flags2 &= ~KASLR_CHECK;
 			kt->flags2 |= (RELOC_AUTO|KASLR);

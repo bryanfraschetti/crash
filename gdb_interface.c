@@ -711,7 +711,7 @@ static char *prohibited_list[] = {
 	"watch", "rwatch", "awatch", "attach", "continue", "c", "fg", "detach", 
 	"finish", "handle", "interrupt", "jump", "kill", "next", "nexti", 
 	"signal", "step", "s", "stepi", "target", "until", "delete", 
-	"clear", "disable", "enable", "condition", "ignore", "frame", "catch",
+	"clear", "disable", "enable", "condition", "ignore", "catch",
 	"tcatch", "return", "file", "exec-file", "core-file", "symbol-file",
 	"load", "si", "ni", "shell", "sy",
 	NULL  /* must be last */
@@ -947,6 +947,12 @@ gdb_lookup_module_symbol(ulong addr, ulong *offset)
 	}
 }
 
+int
+is_kvaddr(ulong addr)
+{
+	return IS_KVADDR(addr);
+}
+
 /*
  *  Used by gdb_interface() to catch gdb-related errors, if desired.
  */
@@ -1067,30 +1073,13 @@ unsigned long crash_get_kaslr_offset(void)
 }
 
 /* Callbacks for crash_target */
-int crash_get_nr_cpus(void);
-int crash_get_cpu_reg (int cpu, int regno, const char *regname,
-                       int regsize, void *val);
-
-int crash_get_nr_cpus(void)
+int crash_get_current_task_reg (int regno, const char *regname,
+				int regsize, void *value);
+int crash_get_current_task_reg (int regno, const char *regname,
+				int regsize, void *value)
 {
-        if (SADUMP_DUMPFILE())
-                return sadump_get_nr_cpus();
-        else if (DISKDUMP_DUMPFILE())
-                return diskdump_get_nr_cpus();
-        else if (KDUMP_DUMPFILE())
-                return kdump_get_nr_cpus();
-        else if (VMSS_DUMPFILE())
-                return vmware_vmss_get_nr_cpus();
-
-        /* Just CPU #0 */
-        return 1;
-}
-
-int crash_get_cpu_reg (int cpu, int regno, const char *regname,
-                       int regsize, void *value)
-{
-        if (!machdep->get_cpu_reg)
-                return FALSE;
-        return machdep->get_cpu_reg(cpu, regno, regname, regsize, value);
+	if (!machdep->get_current_task_reg)
+		return FALSE;
+	return machdep->get_current_task_reg(regno, regname, regsize, value);
 }
 

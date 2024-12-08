@@ -1,3 +1,57 @@
+crash (8.0.6-1) unstable; urgency=medium
+
+  * New upstream release 8.0.6
+  * 89ff1e457344 x86_64: Add gdb stack unwind support
+  * 6dfda0d22355 ppc64: Add gdb stack unwind support
+  * 1fd80c623c20 Preparing for gdb stack unwind support
+  * 7c8a7dddda66 vmware_guestdump: Various format versions support
+  * c4db469af091 x86_64: Fix invalid input "=>" for bt command
+  * 21e0a345f973 Fix cpumask_t recursive dependence issue
+  * 32b03ca26229 Revert "arm64: section_size_bits compatible with macro
+    definitions"
+  * 7b5c8bca7d05 X86 64: improve the method of determining whether kaslr is
+    enabled
+  * 9babe985a7eb kmem: fix the determination for slab page
+  * 0d2ad774532d x86_64: Fix the bug of getting incorrect framesize
+  * 17248cf00276 arm64: Support 16K page, 48 VA bits and 4 level page table
+  * 19ce5a996ce7 arm64: fix 64K page and 52-bits VA support
+  * 3b8f9721e13d arm64: use the same expression to indicate ptrs_per_pgd
+  * 2ebf656a4a17 arm64: fix indent issue and refactor PTE_TO_PHYS
+  * f20a94016148 “kmem address” not working properly when redzone is enabled
+  * 79b93ecb2e72 Fix a "Bus error" issue caused by 'crash --osrelease' or
+    crash loading
+  * af3d266aeb8c arm64: cleanup the pud description
+  * f93d870f8b6a arm64: fix for 'help -m/-M' to correctly display the pmd
+    description
+  * bcdf0f798d01 arm64: Introduction of support for 16K page with 2-level
+    table support
+  * 5218919ec108 s390x: Fix "bt -f/-F" command fail with seek error
+  * 321e1e854588 Fix a segfault issue due to the incorrect irq_stack_size on
+    ARM64
+  * 5cd1c6ace5fe arm64: fix the determination of vmemmap and struct_page_size
+  * f615f8fab7bf Fix "irq -a" exceeding the memory range issue
+  * 38f26cc8b930 LoongArch64: fix incorrect code in the main()
+  * 93d7f647c45b arm64: Introduction of support for 16K page with 3-level
+    table support
+  * 1c6da3eaff82 arm64: Fix bt command show wrong stacktrace on ramdump source
+  * af895b219876 arm64: fix a potential segfault when unwind frame
+  * ce4ddc742fbd List: enable LIST_HEAD_FORMAT for -r option
+  * 3452fe802bf9 Fix "kmem -i" and "swap" commands on Linux 6.10-rc1 and later
+    kernels
+  * 196c4b79c13d X86 64: fix a regression issue about kernel stack padding
+  * a20eb05de3c1 Fix for failing to load kernel module
+  * 6752571d8d78 X86 64: fix for crash session loading failure
+  * 7c2c90d0b06a Fix "kmem -v" option on Linux 6.9 and later kernels
+  * 48764a14bc58 x86_64: fix for adding top_of_kernel_stack_padding for kernel
+    stack
+  * 3879e9104826 Reflect __{start,end}_init_task kernel symbols rename
+  * 568c6f049ad4 arm64: section_size_bits compatible with macro definitions
+  * af2ac4c41df6 Cleanup: replace struct zspage_5_17 with union
+  * a584e9752fb2 Adding the zram decompression algorithm "lzo-rle"
+  * 9104e87db44e Mark start of 8.0.6 development phase with version 8.0.5++
+
+ -- Troy Heber <troyh@debian.org>  Sun, 08 Dec 2024 12:32:27 -0700
+
 crash (8.0.5-1) unstable; urgency=medium
 
   * New upstream

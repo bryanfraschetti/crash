@@ -235,6 +235,7 @@ static void dump_slab_objects(struct meminfo *);
 static void dump_slab_objects_percpu(struct meminfo *);
 static void dump_vmlist(struct meminfo *);
 static void dump_vmap_area(struct meminfo *);
+static int get_vmap_area_list_from_nodes(ulong **);
 static int dump_page_lists(struct meminfo *);
 static void dump_kmeminfo(void);
 static int page_to_phys(ulong, physaddr_t *); 
@@ -351,6 +352,43 @@ static ulong handle_each_vm_area(struct handle_each_vm_area_args *);
 static ulong DISPLAY_DEFAULT;
 
 /*
+ * Before kernel commit ff202303c398e, the value is defined as a macro, so copy it here;
+ * After this commit, the value is defined as an enum, which can be evaluated at runtime.
+ */
+#define PAGE_TYPE_BASE	0xf0000000
+#define PageType(page_type, flag)						\
+	((page_type & (vt->page_type_base | flag)) == vt->page_type_base)
+
+static void page_type_init(void)
+{
+	if (!enumerator_value("PAGE_TYPE_BASE", (long *)&vt->page_type_base))
+		vt->page_type_base = PAGE_TYPE_BASE;
+}
+
+/*
+ * The PG_slab's type has changed from a page flag to a page type
+ * since kernel commit 46df8e73a4a3.
+ */
+static bool page_slab(ulong page, ulong flags)
+{
+	if (vt->flags & SLAB_PAGEFLAGS) {
+		if ((flags >> vt->PG_slab) & 1)
+			return TRUE;
+	}
+
+	if (VALID_MEMBER(page_page_type)) {
+		uint page_type;
+
+		readmem(page+OFFSET(page_page_type), KVADDR, &page_type,
+			sizeof(page_type), "page_type", FAULT_ON_ERROR);
+		if (PageType(page_type, (uint)vt->PG_slab))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+/*
  *  Verify that the sizeof the primitive types are reasonable.
  */
 void
@@ -433,9 +471,15 @@ vm_init(void)
 	if (VALID_MEMBER(vmap_area_va_start) &&
 	    VALID_MEMBER(vmap_area_va_end) &&
 	    VALID_MEMBER(vmap_area_list) &&
-	    VALID_MEMBER(vmap_area_vm) &&
-	    kernel_symbol_exists("vmap_area_list"))
-		vt->flags |= USE_VMAP_AREA;
+	    VALID_MEMBER(vmap_area_vm)) {
+		if (kernel_symbol_exists("vmap_nodes")) {
+			STRUCT_SIZE_INIT(vmap_node, "vmap_node");
+			MEMBER_OFFSET_INIT(vmap_node_busy, "vmap_node", "busy");
+			MEMBER_OFFSET_INIT(rb_list_head, "rb_list", "head");
+			vt->flags |= USE_VMAP_NODES;
+		} else if (kernel_symbol_exists("vmap_area_list"))
+			vt->flags |= USE_VMAP_AREA;
+	}
 
 	if (kernel_symbol_exists("hstates")) {
 		STRUCT_SIZE_INIT(hstate, "hstate");
@@ -497,6 +541,7 @@ vm_init(void)
 		ANON_MEMBER_OFFSET_INIT(page_compound_head, "page", "compound_head");
 	MEMBER_OFFSET_INIT(page_private, "page", "private");
 	MEMBER_OFFSET_INIT(page_freelist, "page", "freelist");
+	MEMBER_OFFSET_INIT(page_page_type, "page", "page_type");
 
 	MEMBER_OFFSET_INIT(mm_struct_pgd, "mm_struct", "pgd");
 
@@ -1270,6 +1315,8 @@ vm_init(void)
 	kmem_cache_init();
 
 	page_flags_init();
+
+	page_type_init();
 
 	rss_page_types_init();
 
@@ -5924,7 +5971,7 @@ dump_mem_map_SPARSEMEM(struct meminfo *mi)
 	                                if ((flags >> v22_PG_Slab) & 1) 
 						slabs++;
 				} else if (vt->PG_slab) {
-	                                if ((flags >> vt->PG_slab) & 1) 
+					if (page_slab(pp, flags))
 						slabs++;
 				} else {
 	                                if ((flags >> v24_PG_slab) & 1) 
@@ -6374,7 +6421,7 @@ dump_mem_map(struct meminfo *mi)
 	                                if ((flags >> v22_PG_Slab) & 1) 
 						slabs++;
 				} else if (vt->PG_slab) {
-	                                if ((flags >> vt->PG_slab) & 1) 
+					if (page_slab(pp, flags))
 						slabs++;
 				} else {
 	                                if ((flags >> v24_PG_slab) & 1) 
@@ -6687,7 +6734,6 @@ dump_hstates()
 	FREEBUF(hstate);
 }
 
-
 static void
 page_flags_init(void)
 {
@@ -6768,6 +6814,9 @@ page_flags_init_from_pageflag_names(void)
 		vt->pageflags_data[i].name = nameptr;
 		vt->pageflags_data[i].mask = mask;
 
+		 if (!strncmp(nameptr, "slab", 4))
+			 vt->flags |= SLAB_PAGEFLAGS;
+
 		if (CRASHDEBUG(1)) {
 			fprintf(fp, "  %08lx %s\n", 
 				vt->pageflags_data[i].mask,
@@ -6828,8 +6877,9 @@ page_flags_init_from_pageflags_enum(void)
 			}
 			strcpy(nameptr, arglist[0] + strlen("PG_"));
 			vt->pageflags_data[p].name = nameptr;
-			vt->pageflags_data[p].mask = 1 << atoi(arglist[2]); 
-
+			vt->pageflags_data[p].mask = 1 << atoi(arglist[2]);
+			if (!strncmp(nameptr, "slab", 4))
+				vt->flags |= SLAB_PAGEFLAGS;
 			p++;
 		}
 	} else 
@@ -8957,7 +9007,7 @@ dump_vmlist(struct meminfo *vi)
 	physaddr_t paddr;
 	int mod_vmlist;
 
-	if (vt->flags & USE_VMAP_AREA) {
+	if (vt->flags & (USE_VMAP_AREA|USE_VMAP_NODES)) {
 		dump_vmap_area(vi);
 		return;
 	}
@@ -9067,6 +9117,77 @@ next_entry:
 		vi->retval = verified;
 }
 
+static int
+sort_by_va_start(const void *arg1, const void *arg2)
+{
+	ulong va_start1, va_start2;
+
+	readmem(*(ulong *)arg1 + OFFSET(vmap_area_va_start), KVADDR, &va_start1,
+		sizeof(void *), "vmap_area.va_start", FAULT_ON_ERROR);
+	readmem(*(ulong *)arg2 + OFFSET(vmap_area_va_start), KVADDR, &va_start2,
+		sizeof(void *), "vmap_area.va_start", FAULT_ON_ERROR);
+
+	return va_start1 < va_start2 ? -1 : (va_start1 == va_start2 ? 0 : 1);
+}
+
+/* Linux 6.9 and later kernels use "vmap_nodes". */
+static int
+get_vmap_area_list_from_nodes(ulong **list_ptr)
+{
+	int i, cnt, c;
+	struct list_data list_data, *ld = &list_data;
+	uint nr_vmap_nodes;
+	ulong vmap_nodes, list_head;
+	ulong *list, *ptr;
+
+	get_symbol_data("nr_vmap_nodes", sizeof(uint), &nr_vmap_nodes);
+	get_symbol_data("vmap_nodes", sizeof(ulong), &vmap_nodes);
+
+	/* count up all vmap_areas. */
+	cnt = 0;
+	for (i = 0; i < nr_vmap_nodes; i++) {
+		BZERO(ld, sizeof(struct list_data));
+		list_head = vmap_nodes + SIZE(vmap_node) * i +
+				OFFSET(vmap_node_busy) + OFFSET(rb_list_head);
+		readmem(list_head, KVADDR, &ld->start, sizeof(void *),
+				"rb_list.head", FAULT_ON_ERROR);
+		ld->list_head_offset = OFFSET(vmap_area_list);
+		ld->end = list_head;
+		c = do_list(ld);
+		if (c < 0)
+			return -1;
+
+		cnt += c;
+	}
+
+	list = ptr = (ulong *)GETBUF(sizeof(void *) * cnt);
+
+	/* gather all vmap_areas into a list. */
+	for (i = 0; i < nr_vmap_nodes; i++) {
+		BZERO(ld, sizeof(struct list_data));
+		ld->flags = LIST_ALLOCATE;
+		list_head = vmap_nodes + SIZE(vmap_node) * i +
+				OFFSET(vmap_node_busy) + OFFSET(rb_list_head);
+		readmem(list_head, KVADDR, &ld->start, sizeof(void *),
+				"rb_list.head", FAULT_ON_ERROR);
+		ld->list_head_offset = OFFSET(vmap_area_list);
+		ld->end = list_head;
+		c = do_list(ld);
+		if (c < 0)
+			return -1;
+
+		memcpy(ptr, ld->list_ptr, sizeof(void *) * c);
+		ptr += c;
+
+		FREEBUF(ld->list_ptr);
+	}
+
+	qsort(list, cnt, sizeof(void *), sort_by_va_start);
+
+	*list_ptr = list;
+	return cnt;
+}
+
 static void
 dump_vmap_area(struct meminfo *vi)
 {
@@ -9080,25 +9201,36 @@ dump_vmap_area(struct meminfo *vi)
 	char buf2[BUFSIZE];
 	char buf3[BUFSIZE];
 	char buf4[BUFSIZE];
+	ulong *list_ptr;
 
 #define VM_VM_AREA 0x4   /* mm/vmalloc.c */
 
-	vmap_area_buf = GETBUF(SIZE(vmap_area));
 	start = count = verified = size = 0;
 
-	ld = &list_data;
-	BZERO(ld, sizeof(struct list_data));
-	ld->flags = LIST_HEAD_FORMAT|LIST_HEAD_POINTER|LIST_ALLOCATE;
-	get_symbol_data("vmap_area_list", sizeof(void *), &ld->start);
-	ld->list_head_offset = OFFSET(vmap_area_list);
-	ld->end = symbol_value("vmap_area_list");
-	cnt = do_list(ld);
-	if (cnt < 0) {
-		FREEBUF(vmap_area_buf);
-		error(WARNING, "invalid/corrupt vmap_area_list\n"); 
-		vi->retval = 0;
-		return;
+	if (vt->flags & USE_VMAP_NODES) {
+		cnt = get_vmap_area_list_from_nodes(&list_ptr);
+		if (cnt < 0) {
+			error(WARNING, "invalid/corrupt vmap_nodes.busy list\n");
+			vi->retval = 0;
+			return;
+		}
+	} else {
+		ld = &list_data;
+		BZERO(ld, sizeof(struct list_data));
+		ld->flags = LIST_HEAD_FORMAT|LIST_HEAD_POINTER|LIST_ALLOCATE;
+		get_symbol_data("vmap_area_list", sizeof(void *), &ld->start);
+		ld->list_head_offset = OFFSET(vmap_area_list);
+		ld->end = symbol_value("vmap_area_list");
+		cnt = do_list(ld);
+		if (cnt < 0) {
+			error(WARNING, "invalid/corrupt vmap_area_list\n");
+			vi->retval = 0;
+			return;
+		}
+		list_ptr = ld->list_ptr;
 	}
+
+	vmap_area_buf = GETBUF(SIZE(vmap_area));
 
 	for (i = 0; i < cnt; i++) {
 		if (!(pc->curcmd_flags & HEADER_PRINTED) && (i == 0) && 
@@ -9116,7 +9248,7 @@ dump_vmap_area(struct meminfo *vi)
 			pc->curcmd_flags |= HEADER_PRINTED;
 		}
 
-		readmem(ld->list_ptr[i], KVADDR, vmap_area_buf,
+		readmem(list_ptr[i], KVADDR, vmap_area_buf,
                         SIZE(vmap_area), "vmap_area struct", FAULT_ON_ERROR); 
 
 		if (VALID_MEMBER(vmap_area_flags) &&
@@ -9158,7 +9290,7 @@ dump_vmap_area(struct meminfo *vi)
 			} 	
 			fprintf(fp, "%s%s  %s%s  %s - %s  %7ld\n",
 				mkstring(buf1,VADDR_PRLEN, LONG_HEX|CENTER|LJUST,
-				MKSTR(ld->list_ptr[i])), space(MINSPACE-1),
+				MKSTR(list_ptr[i])), space(MINSPACE-1),
 				mkstring(buf2,VADDR_PRLEN, LONG_HEX|CENTER|LJUST,
 				MKSTR(vm_struct)), space(MINSPACE-1),
 				mkstring(buf3, VADDR_PRLEN, LONG_HEX|RJUST,
@@ -9179,14 +9311,14 @@ dump_vmap_area(struct meminfo *vi)
 					if (vi->flags & GET_PHYS_TO_VMALLOC) {
 						vi->retval = pcheck +
 						    PAGEOFFSET(vi->spec_addr);
-						FREEBUF(ld->list_ptr);
+						FREEBUF(list_ptr);
 						return;
 				        } else
 						fprintf(fp,
 						"%s%s  %s%s  %s - %s  %7ld\n",
 						mkstring(buf1,VADDR_PRLEN, 
 						LONG_HEX|CENTER|LJUST,
-						MKSTR(ld->list_ptr[i])), 
+						MKSTR(list_ptr[i])),
 						space(MINSPACE-1),
 						mkstring(buf2, VADDR_PRLEN,
 						LONG_HEX|CENTER|LJUST,
@@ -9204,7 +9336,7 @@ dump_vmap_area(struct meminfo *vi)
 	}
 
 	FREEBUF(vmap_area_buf);
-	FREEBUF(ld->list_ptr);
+	FREEBUF(list_ptr);
 
 	if (vi->flags & GET_HIGHEST)
 		vi->retval = start+size;
@@ -9647,14 +9779,14 @@ vaddr_to_kmem_cache(ulong vaddr, char *buf, int verbose)
 		readmem(page+OFFSET(page_flags), KVADDR,
 			&page_flags, sizeof(ulong), "page.flags",
 			FAULT_ON_ERROR);
-		if (!(page_flags & (1 << vt->PG_slab))) {
+		if (!page_slab(page, page_flags)) {
 			if (((vt->flags & KMALLOC_SLUB) || VALID_MEMBER(page_compound_head)) ||
 			    ((vt->flags & KMALLOC_COMMON) &&
 			    VALID_MEMBER(page_slab) && VALID_MEMBER(page_first_page))) {
 				readmem(compound_head(page)+OFFSET(page_flags), KVADDR,
 					&page_flags, sizeof(ulong), "page.flags",
 					FAULT_ON_ERROR);
-				if (!(page_flags & (1 << vt->PG_slab)))
+				if (!page_slab(compound_head(page), page_flags))
 					return NULL;
 			} else
 				return NULL;
@@ -14001,6 +14133,8 @@ dump_vm_table(int verbose)
 		fprintf(fp, "%sSLAB_ROOT_CACHES", others++ ? "|" : "");\
 	if (vt->flags & USE_VMAP_AREA)
 		fprintf(fp, "%sUSE_VMAP_AREA", others++ ? "|" : "");\
+	if (vt->flags & USE_VMAP_NODES)
+		fprintf(fp, "%sUSE_VMAP_NODES", others++ ? "|" : "");\
 	if (vt->flags & CONFIG_NUMA)
 		fprintf(fp, "%sCONFIG_NUMA", others++ ? "|" : "");\
 	if (vt->flags & VM_EVENT)
@@ -14017,6 +14151,8 @@ dump_vm_table(int verbose)
 		fprintf(fp, "%sNODELISTS_IS_PTR", others++ ? "|" : "");\
 	if (vt->flags & VM_INIT)
 		fprintf(fp, "%sVM_INIT", others++ ? "|" : "");\
+	if (vt->flags & SLAB_PAGEFLAGS)
+		fprintf(fp, "%sSLAB_PAGEFLAGS", others++ ? "|" : "");\
 
 	fprintf(fp, ")\n");
 	if (vt->kernel_pgd[0] == vt->kernel_pgd[1])
@@ -14146,6 +14282,7 @@ dump_vm_table(int verbose)
 			vt->pageflags_data[i].mask,
 			vt->pageflags_data[i].name);
 	}
+	fprintf(fp, "     page_type_base: %x\n", vt->page_type_base);
 
 	dump_vma_cache(VERBOSE);
 }
@@ -15984,6 +16121,8 @@ dump_swap_info(ulong swapflags, ulong *totalswap_pages, ulong *totalused_pages)
 	char buf3[BUFSIZE];
 	char buf4[BUFSIZE];
 	char buf5[BUFSIZE];
+	int swap_file_is_file =
+		STREQ(MEMBER_TYPE_NAME("swap_info_struct", "swap_file"), "file");
 
 	if (!symbol_exists("nr_swapfiles"))
 		error(FATAL, "nr_swapfiles doesn't exist in this kernel!\n");
@@ -16027,9 +16166,21 @@ dump_swap_info(ulong swapflags, ulong *totalswap_pages, ulong *totalused_pages)
 		swap_file = ULONG(vt->swap_info_struct + 
 			OFFSET(swap_info_struct_swap_file));
 
-                swap_device = INT(vt->swap_info_struct +
-                        OFFSET_OPTION(swap_info_struct_swap_device, 
-			swap_info_struct_old_block_size));
+		/* Linux 6.10 and later */
+		if (INVALID_MEMBER(swap_info_struct_swap_device) &&
+		    INVALID_MEMBER(swap_info_struct_old_block_size) &&
+		    swap_file_is_file) {
+			ulong inode;
+			ushort mode;
+			readmem(swap_file + OFFSET(file_f_inode), KVADDR, &inode,
+				sizeof(ulong), "swap_file.f_inode", FAULT_ON_ERROR);
+			readmem(inode + OFFSET(inode_i_mode), KVADDR, &mode,
+				sizeof(ushort), "inode.i_mode", FAULT_ON_ERROR);
+			swap_device = S_ISBLK(mode);
+		} else
+			swap_device = INT(vt->swap_info_struct +
+				OFFSET_OPTION(swap_info_struct_swap_device,
+				swap_info_struct_old_block_size));
 
                 pages = INT(vt->swap_info_struct +
                         OFFSET(swap_info_struct_pages));
@@ -16070,8 +16221,12 @@ dump_swap_info(ulong swapflags, ulong *totalswap_pages, ulong *totalused_pages)
                         		OFFSET(swap_info_struct_swap_vfsmnt));
 				get_pathname(swap_file, buf, BUFSIZE, 
 					1, vfsmnt);
-			} else if (VALID_MEMBER
-				(swap_info_struct_old_block_size)) {
+			} else if (VALID_MEMBER(swap_info_struct_old_block_size) ||
+				    swap_file_is_file) {
+				/*
+				 * Linux 6.10 and later kernels do not have old_block_size,
+				 * but this still should work, if swap_file is file.
+				 */
 				devname = vfsmount_devname(file_to_vfsmnt(swap_file), 
 					buf1, BUFSIZE);
 				get_pathname(file_to_dentry(swap_file), 
@@ -19528,7 +19683,8 @@ do_slab_slub(struct meminfo *si, int verbose)
 	int i, free_objects, cpu_slab, is_free, node;
 	ulong p, q;
 #define SLAB_RED_ZONE 0x00000400UL
-	ulong flags, red_left_pad;
+	ulong flags;
+	uint red_left_pad;
 
 	if (!si->slab) {
 		if (CRASHDEBUG(1))
@@ -19618,7 +19774,7 @@ do_slab_slub(struct meminfo *si, int verbose)
 	if (VALID_MEMBER(kmem_cache_red_left_pad)) {
 		flags = ULONG(si->cache_buf + OFFSET(kmem_cache_flags));
 		if (flags & SLAB_RED_ZONE)
-			red_left_pad = ULONG(si->cache_buf + OFFSET(kmem_cache_red_left_pad));
+			red_left_pad = UINT(si->cache_buf + OFFSET(kmem_cache_red_left_pad));
 	}
 
 	for (p = vaddr; p < vaddr + objects * si->size; p += si->size) {
@@ -20085,7 +20241,7 @@ char *
 is_slab_page(struct meminfo *si, char *buf)
 {
 	int i, cnt;
-	ulong page_slab, page_flags, name;
+	ulong pg_slab, page_flags, name;
         ulong *cache_list;
         char *retval;
 
@@ -20100,11 +20256,11 @@ is_slab_page(struct meminfo *si, char *buf)
 	    RETURN_ON_ERROR|QUIET))
 		return NULL;
 
-	if (!(page_flags & (1 << vt->PG_slab)))
+	if (!page_slab(si->spec_addr, page_flags))
 		return NULL;
 
 	if (!readmem(si->spec_addr + OFFSET(page_slab), KVADDR, 
-	    &page_slab, sizeof(ulong), "page.slab", 
+	    &pg_slab, sizeof(ulong), "page.slab",
 	    RETURN_ON_ERROR|QUIET))
 		return NULL;
 
@@ -20112,7 +20268,7 @@ is_slab_page(struct meminfo *si, char *buf)
         cnt = get_kmem_cache_list(&cache_list);
 
 	for (i = 0; i < cnt; i++) {
-		if (page_slab == cache_list[i]) {
+		if (pg_slab == cache_list[i]) {
 			if (!readmem(cache_list[i] + OFFSET(kmem_cache_name), 
 			    KVADDR, &name, sizeof(char *),
 			    "kmem_cache.name", QUIET|RETURN_ON_ERROR))

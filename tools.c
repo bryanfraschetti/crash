@@ -1871,7 +1871,7 @@ cmd_set(void)
 				return;
 
 			if (ACTIVE()) {
-				set_context(tt->this_task, NO_PID);
+				set_context(tt->this_task, NO_PID, TRUE);
 				show_context(CURRENT_CONTEXT());
 				return;
 			}
@@ -1880,7 +1880,7 @@ cmd_set(void)
                 		error(INFO, "no panic task found!\n");
 				return;
 			}
-        		set_context(tt->panic_task, NO_PID);
+			set_context(tt->panic_task, NO_PID, TRUE);
 			show_context(CURRENT_CONTEXT());
 			return;
 
@@ -2559,14 +2559,14 @@ cmd_set(void)
 	                case STR_PID:
                                 pid = value;
                                 task = NO_TASK;
-                        	if (set_context(task, pid))
+                                if (set_context(task, pid, TRUE))
                                 	show_context(CURRENT_CONTEXT());
 	                        break;
 	
 	                case STR_TASK:
                                 task = value;
                                 pid = NO_PID;
-                                if (set_context(task, pid))
+                                if (set_context(task, pid, TRUE))
                                         show_context(CURRENT_CONTEXT()); 
 	                        break;
 	
@@ -3370,6 +3370,7 @@ cmd_list(void)
 			break;
 
 		case 'r':
+			ld->flags |= LIST_HEAD_FORMAT;
 			ld->flags |= LIST_HEAD_REVERSE;
 			break;
 
@@ -6717,9 +6718,13 @@ swap64(uint64_t val, int swap)
 ulong *
 get_cpumask_buf(void)
 {
-	int cpulen;
-	if ((cpulen = STRUCT_SIZE("cpumask_t")) < 0)
-		cpulen = DIV_ROUND_UP(kt->cpus, BITS_PER_LONG) * sizeof(ulong);
+	int cpulen, len_cpumask;
+
+	cpulen = DIV_ROUND_UP(kt->cpus, BITS_PER_LONG) * sizeof(ulong);
+	len_cpumask = VALID_SIZE(cpumask_t) ? SIZE(cpumask_t) : 0;
+	if (len_cpumask > 0)
+		cpulen = len_cpumask > cpulen ? cpulen : len_cpumask;
+
 	return (ulong *)GETBUF(cpulen);
 }
 

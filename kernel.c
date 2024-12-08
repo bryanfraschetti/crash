@@ -157,6 +157,7 @@ kernel_init()
         if (!(kt->cpu_flags = (ulong *)calloc(NR_CPUS, sizeof(ulong))))
                 error(FATAL, "cannot malloc cpu_flags array");
 
+	STRUCT_SIZE_INIT(cpumask_t, "cpumask_t");
 	cpu_maps_init();
 
 	kt->stext = symbol_value("_stext");
@@ -668,6 +669,7 @@ kernel_init()
 	STRUCT_SIZE_INIT(softirq_state, "softirq_state");
 	STRUCT_SIZE_INIT(softirq_action, "softirq_action");
 	STRUCT_SIZE_INIT(desc_struct, "desc_struct");
+	STRUCT_SIZE_INIT(fred_frame, "fred_frame");
 
 	STRUCT_SIZE_INIT(char_device_struct, "char_device_struct");
 	if (VALID_STRUCT(char_device_struct)) {
@@ -913,9 +915,9 @@ cpu_map_size(const char *type)
 	struct gnu_request req;
 
         if (LKCD_KERNTYPES()) {
-                if ((len = STRUCT_SIZE("cpumask_t")) < 0)
-                        error(FATAL, "cannot determine type cpumask_t\n");
-		return len;
+		if (INVALID_SIZE(cpumask_t))
+			error(FATAL, "cannot determine type cpumask_t\n");
+		return SIZE(cpumask_t);
 	}
 
 	sprintf(map_symbol, "cpu_%s_map", type);
@@ -925,11 +927,9 @@ cpu_map_size(const char *type)
 		return len;
 	}
 
-	len = STRUCT_SIZE("cpumask_t");
-	if (len < 0)
+	if (INVALID_SIZE(cpumask_t))
 		return sizeof(ulong);
-	else
-		return len;
+	return SIZE(cpumask_t);
 }
 
 /*
@@ -952,8 +952,10 @@ cpu_maps_init(void)
 		{ ACTIVE_MAP, "active" },
 	};
 
-	if ((len = STRUCT_SIZE("cpumask_t")) < 0)
+	if (INVALID_SIZE(cpumask_t))
 		len = sizeof(ulong);
+	else
+		len = SIZE(cpumask_t);
 
 	buf = GETBUF(len);
 
@@ -3533,6 +3535,39 @@ get_lkcd_regs(struct bt_info *bt, ulong *eip, ulong *esp)
 	machdep->get_stack_frame(bt, eip, esp);
 }
 
+void
+get_dumpfile_regs(struct bt_info *bt, ulong *eip, ulong *esp)
+{
+	bt->flags |= BT_NO_PRINT_REGS;
+
+	if (NETDUMP_DUMPFILE())
+		get_netdump_regs(bt, eip, esp);
+	else if (KDUMP_DUMPFILE())
+		get_kdump_regs(bt, eip, esp);
+	else if (DISKDUMP_DUMPFILE())
+		get_diskdump_regs(bt, eip, esp);
+	else if (KVMDUMP_DUMPFILE())
+		get_kvmdump_regs(bt, eip, esp);
+	else if (LKCD_DUMPFILE())
+		get_lkcd_regs(bt, eip, esp);
+	else if (XENDUMP_DUMPFILE())
+		get_xendump_regs(bt, eip, esp);
+	else if (SADUMP_DUMPFILE())
+		get_sadump_regs(bt, eip, esp);
+	else if (VMSS_DUMPFILE())
+		get_vmware_vmss_regs(bt, eip, esp);
+	else if (REMOTE_PAUSED()) {
+		if (!is_task_active(bt->task) || !get_remote_regs(bt, eip, esp))
+			machdep->get_stack_frame(bt, eip, esp);
+	} else
+		machdep->get_stack_frame(bt, eip, esp);
+
+	bt->flags &= ~BT_NO_PRINT_REGS;
+
+	bt->instptr = *eip;
+	bt->stkptr = *esp;
+}
+
 
 /*
  *  Store the head of the kernel module list for future use.
@@ -3821,9 +3856,21 @@ module_init(void)
 		case KALLSYMS_V2:
 			if (THIS_KERNEL_VERSION >= LINUX(2,6,27)) {
 				numksyms = UINT(modbuf + OFFSET(module_num_symtab));
-				if (MODULE_MEMORY())
-					/* check mem[MOD_TEXT].size only */
-					size = UINT(modbuf + OFFSET(module_mem) + OFFSET(module_memory_size));
+				if (MODULE_MEMORY()) {
+					/*
+					 * The mem[MOD_TEXT].size may be zero, lets count
+					 * the module size as below.
+					*/
+					int t;
+					size = 0;
+					for_each_mod_mem_type(t) {
+						if (t == MOD_INIT_TEXT)
+							break;
+						size += UINT(modbuf + OFFSET(module_mem) +
+								SIZE(module_memory) * t +
+								OFFSET(module_memory_size));
+					}
+				}
 				else
 					size = UINT(modbuf + MODULE_OFFSET2(module_core_size, rx));
 			} else {
@@ -3926,7 +3973,7 @@ verify_modules(void)
 
                 for (i = 0, found = FALSE; i < kt->mods_installed; i++) {
                         lm = &st->load_modules[i];
-			if (!kvtop(NULL, lm->mod_base, &paddr, 0)) {
+			if (lm->mod_base && !kvtop(NULL, lm->mod_base, &paddr, 0)) {
 				irregularities++;
                                 break;
 			}
@@ -6494,14 +6541,19 @@ set_cpu(int cpu)
 	if (hide_offline_cpu(cpu))
 		error(FATAL, "invalid cpu number: cpu %d is OFFLINE\n", cpu);
 
-	if ((task = get_active_task(cpu))) 
-		set_context(task, NO_PID);
+	task = get_active_task(cpu);
+
+	/* Check if context is already set to given cpu */
+	if (task == CURRENT_TASK())
+		return;
+
+	if (task)
+		set_context(task, NO_PID, TRUE);
 	else
 		error(FATAL, "cannot determine active task on cpu %ld\n", cpu);
 
 	show_context(CURRENT_CONTEXT());
 }
-
 
 /*
  *  Collect the irq_desc[] entry along with its associated handler and
@@ -7349,7 +7401,7 @@ void
 generic_get_irq_affinity(int irq)
 {
 	ulong irq_desc_addr;
-	long len;
+	long len, len_cpumask;
 	ulong affinity_ptr;
 	ulong *affinity;
 	ulong tmp_addr;
@@ -7369,8 +7421,10 @@ generic_get_irq_affinity(int irq)
 	if (!action)
 		return;
 
-	if ((len = STRUCT_SIZE("cpumask_t")) < 0)
-		len = DIV_ROUND_UP(kt->cpus, BITS_PER_LONG) * sizeof(ulong);
+	len = DIV_ROUND_UP(kt->cpus, BITS_PER_LONG) * sizeof(ulong);
+	len_cpumask = VALID_SIZE(cpumask_t) ? SIZE(cpumask_t) : 0;
+	if (len_cpumask > 0)
+		len = len_cpumask > len ? len : len_cpumask;
 
 	affinity = (ulong *)GETBUF(len);
 	if (VALID_MEMBER(irq_common_data_affinity))
