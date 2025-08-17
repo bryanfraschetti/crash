@@ -1,3 +1,9 @@
+crash (8.0.6-2) unstable; urgency=medium
+
+  * Orphan crash
+
+ -- Troy Heber <troyh@debian.org>  Sun, 17 Aug 2025 14:32:47 -0600
+
 crash (8.0.6-1) unstable; urgency=medium
 
   * New upstream release 8.0.6
