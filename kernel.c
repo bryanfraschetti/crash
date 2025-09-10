@@ -23,7 +23,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include "xendump.h"
-#if defined(GDB_7_6) || defined(GDB_10_2)
+#if defined(GDB_7_6) || defined(GDB_10_2) || defined(GDB_16_2)
 #define __CONFIG_H__ 1
 #include "config.h"
 #endif
@@ -1574,8 +1574,8 @@ list_source_code(struct gnu_request *req, int count_entered)
 			error(FATAL, 
 			    "%s: source code is not available\n\n", req->buf);
 
-		sprintf(buf3, "%s: No such file or directory.", file);
-		if (decimal(argv[0], 0) && strstr(buf1, buf3))
+               sprintf(buf3, "%s: No such file or directory", file);
+               if ((decimal(argv[0], 0) || decimal(argv[1], 0)) && strstr(buf1, buf3))
 			error(FATAL, 
 			    "%s: source code is not available\n\n", req->buf);
 
@@ -5816,15 +5816,16 @@ display_sys_stats(void)
 				pc->kvmdump_mapfile);
 	}
 	
-	if (machine_type("PPC64"))
-		fprintf(fp, "        CPUS: %d\n", get_cpus_to_display());
-	else {
-		fprintf(fp, "        CPUS: %d", kt->cpus);
-		if (kt->cpus - get_cpus_to_display())
-			fprintf(fp, " [OFFLINE: %d]", 
-				kt->cpus - get_cpus_to_display());
-		fprintf(fp, "\n");
-	}
+	int number_cpus_to_display = get_cpus_to_display();
+	int number_cpus_present = get_cpus_present();
+	if (!number_cpus_present)
+		number_cpus_present = kt->cpus;
+
+	fprintf(fp, "        CPUS: %d", number_cpus_present);
+	if (number_cpus_present > number_cpus_to_display)
+		fprintf(fp, " [OFFLINE: %d]",
+			number_cpus_present - number_cpus_to_display);
+	fprintf(fp, "\n");
 
 	if (ACTIVE())
 		get_xtime(&kt->date);

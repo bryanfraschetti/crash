@@ -17,7 +17,7 @@
 
 #include "defs.h"
 #include <elf.h>
-#if defined(GDB_7_6) || defined(GDB_10_2)
+#if defined(GDB_7_6) || defined(GDB_10_2) || defined(GDB_16_2)
 #define __CONFIG_H__ 1
 #include "config.h"
 #endif
@@ -479,7 +479,7 @@ separate_debug_file_exists(const char *name, unsigned long crc, int *exists)
 #ifdef GDB_5_3
     		file_crc = calc_crc32(file_crc, buffer, count);
 #else
-#if defined(GDB_7_6) || defined(GDB_10_2)
+#if defined(GDB_7_6) || defined(GDB_10_2) || defined(GDB_16_2)
     		file_crc = bfd_calc_gnu_debuglink_crc32(file_crc, 
 			(unsigned char *)buffer, count);
 #else
@@ -1233,6 +1233,9 @@ mod_symname_hash_install(struct syment *spn)
 		return;
 	}
 	for (; sp; sp = sp->name_hash_next) {
+		if (spn == sp)
+			return;
+
 		if (!sp->name_hash_next ||
 		    spn->value < sp->name_hash_next->value) {
 			spn->name_hash_next = sp->name_hash_next;
@@ -2076,6 +2079,8 @@ store_module_symbols_6_4(ulong total, int mods_installed)
 				strbuf = NULL;
 			}
 		}
+		else
+			strbuf = NULL;
 
 
 		for (i = 0; i < nsyms; i++) {
@@ -2196,7 +2201,7 @@ store_module_symbols_6_4(ulong total, int mods_installed)
 			if (!lm->mem[t].size)
 				continue;
 
-			st->ext_module_symtable[mcnt].value = lm->mem[t].base + lm->mem[t].size;
+			st->ext_module_symtable[mcnt].value = lm->mem[t].base + lm->mem[t].size - 1;
 			st->ext_module_symtable[mcnt].type = 'm';
 			st->ext_module_symtable[mcnt].flags |= MODULE_SYMBOL;
 			sprintf(buf2, "%s%s", module_tag[t].end, mod_name);
@@ -5459,8 +5464,14 @@ old_module:
 int
 in_ksymbol_range(ulong value)
 {
+	int i;
+	for (i = st->symcnt-1; i >= 0; i--) {
+		if (!strstr(st->symtable[i].name, "xen_elfnote"))
+			break;
+	}
+
         if ((value >= st->symtable[0].value) && 
-	    (value <= st->symtable[st->symcnt-1].value)) {
+	    (value <= st->symtable[i].value)) {
 		if ((st->flags & PERCPU_SYMS) && (value < st->first_ksymbol))
 			return FALSE;
 		else
@@ -9829,12 +9840,32 @@ dump_offset_table(char *spec, ulong makestruct)
                 OFFSET(task_struct_thread_reg29));
         fprintf(fp, "      task_struct_thread_reg31: %ld\n",
                 OFFSET(task_struct_thread_reg31));
-	fprintf(fp, " task_struct_thread_context_fp: %ld\n",
-		OFFSET(task_struct_thread_context_fp));
-	fprintf(fp, " task_struct_thread_context_sp: %ld\n",
-		OFFSET(task_struct_thread_context_sp));
-	fprintf(fp, " task_struct_thread_context_pc: %ld\n",
-		OFFSET(task_struct_thread_context_pc));
+        fprintf(fp, "task_struct_thread_context_x19: %ld\n",
+                OFFSET(task_struct_thread_context_x19));
+        fprintf(fp, "task_struct_thread_context_x20: %ld\n",
+                OFFSET(task_struct_thread_context_x20));
+        fprintf(fp, "task_struct_thread_context_x21: %ld\n",
+                OFFSET(task_struct_thread_context_x21));
+        fprintf(fp, "task_struct_thread_context_x22: %ld\n",
+                OFFSET(task_struct_thread_context_x22));
+        fprintf(fp, "task_struct_thread_context_x23: %ld\n",
+                OFFSET(task_struct_thread_context_x23));
+        fprintf(fp, "task_struct_thread_context_x24: %ld\n",
+                OFFSET(task_struct_thread_context_x24));
+        fprintf(fp, "task_struct_thread_context_x25: %ld\n",
+                OFFSET(task_struct_thread_context_x25));
+        fprintf(fp, "task_struct_thread_context_x26: %ld\n",
+                OFFSET(task_struct_thread_context_x26));
+        fprintf(fp, "task_struct_thread_context_x27: %ld\n",
+                OFFSET(task_struct_thread_context_x27));
+        fprintf(fp, "task_struct_thread_context_x28: %ld\n",
+                OFFSET(task_struct_thread_context_x28));
+        fprintf(fp, " task_struct_thread_context_fp: %ld\n",
+                OFFSET(task_struct_thread_context_fp));
+        fprintf(fp, " task_struct_thread_context_sp: %ld\n",
+                OFFSET(task_struct_thread_context_sp));
+        fprintf(fp, " task_struct_thread_context_pc: %ld\n",
+                OFFSET(task_struct_thread_context_pc));
 	fprintf(fp, "         task_struct_processor: %ld\n", 
 		OFFSET(task_struct_processor));
 	fprintf(fp, "            task_struct_p_pptr: %ld\n",
@@ -11005,6 +11036,7 @@ dump_offset_table(char *spec, ulong makestruct)
 
         fprintf(fp, "                neighbour_next: %ld\n", 
 		OFFSET(neighbour_next));
+        fprintf(fp, "                neighbour_hash: %ld\n", OFFSET(neighbour_hash));
         fprintf(fp, "         neighbour_primary_key: %ld\n", 
 		OFFSET(neighbour_primary_key));
         fprintf(fp, "                  neighbour_ha: %ld\n", 
@@ -11015,6 +11047,7 @@ dump_offset_table(char *spec, ulong makestruct)
 		OFFSET(neighbour_nud_state));
         fprintf(fp, "      neigh_table_hash_buckets: %ld\n",
 		OFFSET(neigh_table_hash_buckets));
+        fprintf(fp, "        neigh_table_hash_heads: %ld\n", OFFSET(neigh_table_hash_heads));
         fprintf(fp, "         neigh_table_hash_mask: %ld\n",
 		OFFSET(neigh_table_hash_mask));
         fprintf(fp, "        neigh_table_hash_shift: %ld\n",
@@ -12775,6 +12808,7 @@ calculate_load_order_6_4(struct load_module *lm, bfd *bfd, int dynamic,
 	asymbol *store;
 	asymbol *sym;
 	symbol_info syminfo;
+	bfd_vma secaddr;
 	char *secname;
 	int i, t;
 
@@ -12827,6 +12861,7 @@ calculate_load_order_6_4(struct load_module *lm, bfd *bfd, int dynamic,
 				}
 				if (strcmp(syminfo.name, s1->name) == 0) {
 					secname = (char *)bfd_section_name(sym->section);
+					secaddr = bfd_section_vma(sym->section);
 					break;
 				}
 
@@ -12857,14 +12892,14 @@ calculate_load_order_6_4(struct load_module *lm, bfd *bfd, int dynamic,
 			}
 
 			/* Update the offset information for the section */
-			sec_start = s1->value - syminfo.value;
+			sec_start = s1->value - syminfo.value + secaddr;
 			/* keep the address instead of offset */
 			lm->mod_section_data[i].addr = sec_start;
 			lm->mod_section_data[i].flags |= SEC_FOUND;
 
 			if (CRASHDEBUG(2))
-				fprintf(fp, "update sec offset sym %s @ %lx  val %lx  section %s\n",
-					s1->name, s1->value, (ulong)syminfo.value, secname);
+				fprintf(fp, "update sec offset sym %s @ %lx  val %lx  section %s @ %lx\n",
+					s1->name, s1->value, (ulong)syminfo.value, secname, secaddr);
 
 			if (strcmp(secname, ".text") == 0)
 				lm->mod_text_start = sec_start;
