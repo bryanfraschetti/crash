@@ -1,3 +1,16 @@
+crash (9.0.0-0+hf417806.1) noble; urgency=medium
+
+  * New upstream release 9.0.0
+
+  * For more details, full release note is available here:
+    - https://github.com/crash-utility/crash/releases/tag/9.0.0
+
+  * d/c: Added wget to build-depends to fetch the gdb source
+
+  * d/r: Updated the version of gdb for proper removal during dh clean
+
+ -- Bryan Fraschetti <bryan.fraschetti@canonical.com>  Wed, 10 Sep 2025 16:01:18 +0000
+
 crash (8.0.6-2) unstable; urgency=medium
 
   * Orphan crash
