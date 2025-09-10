@@ -23,7 +23,7 @@ override_dh_clean:
 	dh_clean
 	cp $(CURDIR)/debian/Makefile.ori $(CURDIR)/Makefile
 	rm -Rf $(CURDIR)/configure
-	rm -Rf $(CURDIR)/gdb-10.2
+	rm -Rf $(CURDIR)/gdb-16.2
 	rm -Rf $(CURDIR)/gdb.files
 	rm -Rf $(CURDIR)/build_data.c
 	rm -Rf $(CURDIR)/extensions/*.so
