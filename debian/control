@@ -3,7 +3,7 @@ Section: utils
 Priority: optional
 Maintainer: Debian QA Group <packages@qa.debian.org>
 Uploaders:
-Build-Depends: debhelper (>= 13), dpkg-dev (>= 1.16.1), quilt (>= 0.47), binutils, binutils-dev, bison, gawk, flex, zlib1g-dev, libncurses-dev, liblzo2-dev, libsnappy-dev, libzstd-dev, texinfo
+Build-Depends: debhelper (>= 13), dpkg-dev (>= 1.16.1), quilt (>= 0.47), binutils, binutils-dev, bison, gawk, flex, zlib1g-dev, libncurses-dev, liblzo2-dev, libsnappy-dev, libzstd-dev, texinfo, wget
 Standards-Version: 4.7.0
 Homepage: https://crash-utility.github.io/
 XS-Testsuite: autopkgtest
