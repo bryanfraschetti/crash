@@ -1,0 +1,549 @@
+From 968debd0d5979dd9ddca3af0766bad714dbd51e3 Mon Sep 17 00:00:00 2001
+From: Tao Liu <ltao@redhat.com>
+Date: Wed, 4 Sep 2024 19:49:40 +1200
+Subject: arm64: Add gdb stack unwind support
+
+Signed-off-by: Tao Liu <ltao@redhat.com>
+
+Origin: backport, https://github.com/crash-utility/crash/commit/968debd0d5979dd9ddca3af0766bad714dbd51e3
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/crash/+bug/2125145
+
+diff --git a/arm64.c b/arm64.c
+index 2b6b0e58..62b3809d 100644
+--- a/arm64.c
++++ b/arm64.c
+@@ -101,6 +101,46 @@ struct kernel_range {
+ static struct kernel_range *arm64_get_va_range(struct machine_specific *ms);
+ static void arm64_get_struct_page_size(struct machine_specific *ms);
+ 
++/* mte tag shift bit */
++#define MTE_TAG_SHIFT		56
++/* native kernel pointers tag */
++#define KASAN_TAG_KERNEL	0xFF
++/* minimum value for random tags */
++#define KASAN_TAG_MIN		0xF0
++/* right shift the tag to MTE_TAG_SHIFT bit */
++#define mte_tag_shifted(tag)	((ulong)(tag) << MTE_TAG_SHIFT)
++/* get the top byte value of the original kvaddr */
++#define mte_tag_get(addr)	(unsigned char)((ulong)(addr) >> MTE_TAG_SHIFT)
++/* reset the top byte to get an untaggged kvaddr */
++#define mte_tag_reset(addr)	(((ulong)addr & ~mte_tag_shifted(KASAN_TAG_KERNEL)) | \
++					mte_tag_shifted(KASAN_TAG_KERNEL))
++
++struct user_regs_bitmap_struct {
++	struct arm64_pt_regs ur;
++	ulong bitmap[32];
++};
++
++static inline bool is_mte_kvaddr(ulong addr)
++{
++	/* check for ARM64_MTE enabled */
++	if (!(machdep->flags & ARM64_MTE))
++		return false;
++
++	/* check the validity of HW Tag-Based kvaddr */
++	if (mte_tag_get(addr) >= KASAN_TAG_MIN && mte_tag_get(addr) < KASAN_TAG_KERNEL)
++		return true;
++
++	return false;
++}
++
++static int arm64_is_kvaddr(ulong addr)
++{
++	if (is_mte_kvaddr(addr))
++		return (mte_tag_reset(addr) >= (ulong)(machdep->kvbase));
++
++	return (addr >= (ulong)(machdep->kvbase));
++}
++
+ static void arm64_calc_kernel_start(void)
+ {
+ 	struct machine_specific *ms = machdep->machspec;
+@@ -116,6 +156,134 @@ static void arm64_calc_kernel_start(void)
+ 	ms->kimage_end = (sp ? sp->value : 0);
+ }
+ 
++static int
++arm64_vmemmap_is_page_ptr(ulong addr, physaddr_t *phys)
++{
++	ulong size = SIZE(page);
++	ulong pfn, nr;
++
++	if (IS_SPARSEMEM() && (machdep->flags & VMEMMAP) &&
++	    (addr >= VMEMMAP_VADDR && addr <= VMEMMAP_END) &&
++	    !((addr - VMEMMAP_VADDR) % size)) {
++
++		pfn = (addr - machdep->machspec->vmemmap) / size;
++		nr = pfn_to_section_nr(pfn);
++		if (valid_section_nr(nr)) {
++			if (phys)
++				*phys = PTOB(pfn);
++			return TRUE;
++		}
++	}
++	return FALSE;
++}
++
++static void arm64_get_vmemmap_page_ptr(void)
++{
++	struct machine_specific *ms = machdep->machspec;
++
++	/* If vmemmap exists, it means kernel enabled CONFIG_SPARSEMEM_VMEMMAP */
++	if (arm64_get_vmcoreinfo_ul(&ms->vmemmap, "SYMBOL(vmemmap)", NUM_HEX))
++		goto out;
++
++	/* The global symbol of vmemmap is removed since kernel commit 7bc1a0f9e1765 */
++	if (kernel_symbol_exists("vmemmap"))
++		ms->vmemmap = symbol_value("vmemmap");
++	else
++		ms->vmemmap = ms->vmemmap_vaddr - ((ms->phys_offset >> machdep->pageshift) * ms->struct_page_size);
++
++out:
++	if (ms->vmemmap)
++		machdep->is_page_ptr = arm64_vmemmap_is_page_ptr;
++}
++
++static int
++arm64_get_current_task_reg(int regno, const char *name,
++                   int size, void *value)
++{
++	struct bt_info bt_info, bt_setup;
++	struct task_context *tc;
++	struct user_regs_bitmap_struct *ur_bitmap;
++	ulong ip, sp;
++	bool ret = FALSE;
++
++	switch (regno) {
++		case X0_REGNUM ... PC_REGNUM:
++		break;
++	default:
++		return FALSE;
++	}
++
++	tc = CURRENT_CONTEXT();
++	if (!tc)
++		return FALSE;
++	BZERO(&bt_setup, sizeof(struct bt_info));
++	clone_bt_info(&bt_setup, &bt_info, tc);
++	fill_stackbuf(&bt_info);
++
++	get_dumpfile_regs(&bt_info, &sp, &ip);
++	if (bt_info.stackbuf)
++		FREEBUF(bt_info.stackbuf);
++	ur_bitmap = (struct user_regs_bitmap_struct *)bt_info.machdep;
++	if (!ur_bitmap)
++		return FALSE;
++
++	if (!bt_info.need_free) {
++		goto get_all;
++	}
++
++	switch (regno) {
++	case X0_REGNUM ... X30_REGNUM:
++		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
++		    REG_SEQ(arm64_pt_regs, regs[0]) + regno - X0_REGNUM)) {
++			FREEBUF(ur_bitmap);
++			return FALSE;
++		}
++		break;
++	case SP_REGNUM:
++		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
++		    REG_SEQ(arm64_pt_regs, sp))) {
++			FREEBUF(ur_bitmap);
++			return FALSE;
++		}
++		break;
++	case PC_REGNUM:
++		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
++		    REG_SEQ(arm64_pt_regs, pc))) {
++			FREEBUF(ur_bitmap);
++			return FALSE;
++		}
++		break;
++	}
++
++get_all:
++	switch (regno) {
++	case X0_REGNUM ... X30_REGNUM:
++		if (size != sizeof(ur_bitmap->ur.regs[regno]))
++			break;
++		memcpy(value, &ur_bitmap->ur.regs[regno], size);
++		ret = TRUE;
++		break;
++	case SP_REGNUM:
++		if (size != sizeof(ur_bitmap->ur.sp))
++			break;
++		memcpy(value, &ur_bitmap->ur.sp, size);
++		ret = TRUE;
++		break;
++	case PC_REGNUM:
++		if (size != sizeof(ur_bitmap->ur.pc))
++			break;
++		memcpy(value, &ur_bitmap->ur.pc, size);
++		ret = TRUE;
++		break;
++	}
++
++	if (bt_info.need_free) {
++		FREEBUF(ur_bitmap);
++		bt_info.need_free = FALSE;
++	}
++	return ret;
++}
++
+ /*
+  * Do all necessary machine-specific setup here. This is called several times
+  * during initialization.
+@@ -415,6 +583,7 @@ arm64_init(int when)
+ 		machdep->dumpfile_init = NULL;
+ 		machdep->verify_line_number = NULL;
+ 		machdep->init_kernel_pgd = arm64_init_kernel_pgd;
++		machdep->get_current_task_reg = arm64_get_current_task_reg;
+ 
+ 		/* use machdep parameters */
+ 		arm64_calc_phys_offset();
+@@ -539,6 +708,7 @@ arm64_init(int when)
+ 		 */
+ 		if (!LIVE()) 
+ 			arm64_get_crash_notes();
++		gdb_change_thread_context();
+ 		break;
+ 
+ 	case LOG_ONLY:
+@@ -573,7 +743,7 @@ static int arm64_get_struct_page_max_shift(struct machine_specific *ms)
+ }
+ 
+ /* Return TRUE if we succeed, return FALSE on failure. */
+-static int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
++int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
+ {
+ 	char *string = pc->read_vmcoreinfo(label);
+ 
+@@ -3725,6 +3895,7 @@ arm64_get_dumpfile_stackframe(struct bt_info *bt, struct arm64_stackframe *frame
+ try_kernel:
+ 		frame->sp = ptregs->sp;
+ 		frame->fp = ptregs->regs[29];
++		bt->machdep = ptregs;
+ 	}
+ 
+ 	if (arm64_in_kdump_text(bt, frame) || 
+@@ -3753,23 +3924,31 @@ arm64_get_stackframe(struct bt_info *bt, struct arm64_stackframe *frame)
+ static void
+ arm64_get_stack_frame(struct bt_info *bt, ulong *pcp, ulong *spp)
+ {
+-	int ret;
++	struct user_regs_bitmap_struct *ur_bitmap;
+ 	struct arm64_stackframe stackframe = { 0 };
+ 
+ 	if (DUMPFILE() && is_task_active(bt->task)) {
+-		ret = arm64_get_dumpfile_stackframe(bt, &stackframe);
++		arm64_get_dumpfile_stackframe(bt, &stackframe);
++		bt->need_free = FALSE;
+ 	} else {
+ 		if (bt->flags & BT_SKIP_IDLE)
+ 			bt->flags &= ~BT_SKIP_IDLE;
+ 
+-		ret = arm64_get_stackframe(bt, &stackframe);
++		arm64_get_stackframe(bt, &stackframe);
++
++		ur_bitmap = (struct user_regs_bitmap_struct *)GETBUF(sizeof(*ur_bitmap));
++		memset(ur_bitmap, 0, sizeof(*ur_bitmap));
++		ur_bitmap->ur.pc = stackframe.pc;
++		ur_bitmap->ur.sp = stackframe.sp;
++		ur_bitmap->ur.regs[29] = stackframe.fp;
++		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, pc));
++		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, sp));
++		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, regs[0])
++						+ X29_REGNUM - X0_REGNUM);
++		bt->machdep = ur_bitmap;
++		bt->need_free = TRUE;
+ 	}
+ 
+-	if (!ret)
+-		error(WARNING, 
+-			"cannot determine starting stack frame for task %lx\n",
+-				bt->task);
+-
+ 	bt->frameptr = stackframe.fp;
+ 	if (pcp)
+ 		*pcp = stackframe.pc;
+diff --git a/crash_target.c b/crash_target.c
+index 45548067..421e38da 100644
+--- a/crash_target.c
++++ b/crash_target.c
+@@ -27,8 +27,9 @@ void crash_target_init (void);
+ 
+ extern "C" int gdb_readmem_callback(unsigned long, void *, int, int);
+ extern "C" int crash_get_nr_cpus(void);
+-extern "C" int crash_get_cpu_reg (int cpu, int regno, const char *regname,
+-                                  int regsize, void *val);
++extern "C" int crash_get_current_task_reg (int regno, const char *regname,
++                                  int regsize, void *val, int sid);
++extern "C" int gdb_change_thread_context (void);
+ 
+ 
+ /* The crash target.  */
+@@ -65,27 +66,32 @@ class crash_target final : public process_stratum_target
+ };
+ 
+ /* We just get all the registers, so we don't use regno.  */
+-void
+-crash_target::fetch_registers (struct regcache *regcache, int regno)
++static void supply_registers(struct regcache *regcache, int regno)
+ {
+-  gdb_byte regval[16];
+-  int cpu = inferior_ptid.tid();
++  gdb_byte regval[32];
+   struct gdbarch *arch = regcache->arch ();
++  const char *regname = gdbarch_register_name(arch, regno);
++  int regsize = register_size(arch, regno);
+ 
+-  for (int r = 0; r < gdbarch_num_regs (arch); r++)
+-    {
+-      const char *regname = gdbarch_register_name(arch, r);
+-      int regsize = register_size (arch, r);
+-      if (regsize > sizeof (regval))
+-        error (_("fatal error: buffer size is not enough to fit register value"));
+-
+-      if (crash_get_cpu_reg (cpu, r, regname, regsize, (void *)&regval))
+-        regcache->raw_supply (r, regval);
+-      else
+-        regcache->raw_supply (r, NULL);
+-    }
++  if (regsize > sizeof (regval))
++    error (_("fatal error: buffer size is not enough to fit register value"));
++
++  if (crash_get_current_task_reg (regno, regname, regsize, (void *)&regval, inferior_thread()->ptid.tid()))
++    regcache->raw_supply (regno, regval);
++  else
++    regcache->raw_supply (regno, NULL);
+ }
+ 
++void
++crash_target::fetch_registers (struct regcache *regcache, int regno)
++{
++  if (regno >= 0) {
++    supply_registers(regcache, regno);
++  } else if (regno == -1) {
++    for (int r = 0; r < gdbarch_num_regs (regcache->arch ()); r++)
++      supply_registers(regcache, r);
++  }
++}
+ 
+ enum target_xfer_status
+ crash_target::xfer_partial (enum target_object object, const char *annex,
+@@ -133,3 +139,27 @@ crash_target_init (void)
+   /* Now, set up the frame cache. */
+   reinit_frame_cache ();
+ }
++
++extern "C" int
++gdb_change_thread_context (void)
++{
++  /* 1st, switch to tid 0 if we are not */
++  if (inferior_thread()->ptid.tid()) {
++       switch_to_thread (current_inferior()->thread_list);
++  }
++  /* 2nd, delete threads whose tid is not 0 */
++  for (thread_info *tp : current_inferior()->threads_safe()) {
++       if (tp->ptid.tid() && tp->deletable()) {
++               delete_thread_silent(tp);
++               current_inferior()->highest_thread_num--;
++       }
++  }
++  /* 3rd, refresh regcache for tid 0 */
++  target_fetch_registers(get_thread_regcache(inferior_thread()), -1);
++  reinit_frame_cache();
++#if defined (X86_64) || defined (ARM64) || defined (PPC64)
++  /* 4th, invoke bt silently to refresh the additional stacks */
++  silent_call_bt();
++#endif
++  return TRUE;
++}
+\ No newline at end of file
+diff --git a/defs.h b/defs.h
+index 788f63ad..73b4bf4e 100644
+--- a/defs.h
++++ b/defs.h
+@@ -976,6 +976,7 @@ struct bt_info {
+ 	ulong eframe_ip;
+ 	ulong radix;
+ 	ulong *cpumask;
++	bool need_free;
+ };
+ 
+ #define STACK_OFFSET_TYPE(OFF) \
+@@ -1074,6 +1075,7 @@ struct machdep_table {
+         void (*get_irq_affinity)(int);
+         void (*show_interrupts)(int, ulong *);
+ 	int (*is_page_ptr)(ulong, physaddr_t *);
++	int (*get_current_task_reg)(int, const char *, int, void *, int);
+ 	int (*get_cpu_reg)(int, int, const char *, int, void *);
+ 	int (*is_cpu_prstatus_valid)(int cpu);
+ };
+@@ -3347,6 +3349,7 @@ typedef signed int s32;
+ #define FLIPPED_VM    (0x400)
+ #define HAS_PHYSVIRT_OFFSET (0x800)
+ #define OVERFLOW_STACKS     (0x1000)
++#define ARM64_MTE     (0x2000)
+ 
+ /*
+  * Get kimage_voffset from /dev/crash
+@@ -3485,6 +3488,7 @@ struct machine_specific {
+ 	ulong CONFIG_ARM64_KERNELPACMASK;
+ 	ulong physvirt_offset;
+ 	ulong struct_page_size;
++	ulong vmemmap;
+ };
+ 
+ struct arm64_stackframe {
+@@ -6022,6 +6026,7 @@ int load_module_symbols_helper(char *);
+ void unlink_module(struct load_module *);
+ int check_specified_module_tree(char *, char *);
+ int is_system_call(char *, ulong);
++void get_dumpfile_regs(struct bt_info*, ulong*, ulong*);
+ void generic_dump_irq(int);
+ void generic_get_irq_affinity(int);
+ void generic_show_interrupts(int, ulong *);
+@@ -6120,6 +6125,7 @@ ulong cpu_map_addr(const char *type);
+ #define BT_REGS_NOT_FOUND (0x4000000000000ULL)
+ #define BT_OVERFLOW_STACK (0x8000000000000ULL)
+ #define BT_SKIP_IDLE     (0x10000000000000ULL)
++#define BT_NO_PRINT_REGS (0x20000000000000ULL)
+ #define BT_SYMBOL_OFFSET   (BT_SYMBOLIC_ARGS)
+ 
+ #define BT_REF_HEXVAL         (0x1)
+@@ -7804,6 +7810,13 @@ extern int have_full_symbols(void);
+ #define XEN_HYPERVISOR_ARCH 
+ #endif
+ 
++#ifndef offsetof
++#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
++#endif
++#define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
++#define REG_SEQ(TYPE, MEMBER) \
++	(offsetof(struct TYPE, MEMBER) / FIELD_SIZEOF(struct TYPE, MEMBER))
++
+ /*
+  * Register numbers must be in sync with gdb/features/i386/64bit-core.c
+  * to make crash_target->fetch_registers() ---> machdep->get_cpu_reg()
+@@ -7853,4 +7866,52 @@ enum x86_64_regnum {
+         LAST_REGNUM
+ };
+ 
++enum arm64_regnum {
++	X0_REGNUM,
++	X1_REGNUM,
++	X2_REGNUM,
++	X3_REGNUM,
++	X4_REGNUM,
++	X5_REGNUM,
++	X6_REGNUM,
++	X7_REGNUM,
++	X8_REGNUM,
++	X9_REGNUM,
++	X10_REGNUM,
++	X11_REGNUM,
++	X12_REGNUM,
++	X13_REGNUM,
++	X14_REGNUM,
++	X15_REGNUM,
++	X16_REGNUM,
++	X17_REGNUM,
++	X18_REGNUM,
++	X19_REGNUM,
++	X20_REGNUM,
++	X21_REGNUM,
++	X22_REGNUM,
++	X23_REGNUM,
++	X24_REGNUM,
++	X25_REGNUM,
++	X26_REGNUM,
++	X27_REGNUM,
++	X28_REGNUM,
++	X29_REGNUM,
++	X30_REGNUM,
++	SP_REGNUM,
++	PC_REGNUM,
++};
++
++/*
++ * Register numbers to make crash_target->fetch_registers()
++ * ---> machdep->get_current_task_reg() work properly.
++ *
++ *  These register numbers and names are given according to output of
++ *  `rs6000_register_name`, because that is what was being used by
++ *  crash_target::fetch_registers in case of PPC64
++ */
++
++/* crash_target.c */
++extern int gdb_change_thread_context (void);
++
+ #endif /* !GDB_COMMON */
+diff --git a/gdb_interface.c b/gdb_interface.c
+index b14319c6..8477f9f3 100644
+--- a/gdb_interface.c
++++ b/gdb_interface.c
+@@ -1086,11 +1086,14 @@ int crash_get_nr_cpus(void)
+         return 1;
+ }
+ 
+-int crash_get_cpu_reg (int cpu, int regno, const char *regname,
+-                       int regsize, void *value)
++/* Callbacks for crash_target */
++int crash_get_current_task_reg (int regno, const char *regname,
++				int regsize, void *value, int sid);
++int crash_get_current_task_reg (int regno, const char *regname,
++				int regsize, void *value, int sid)
+ {
+-        if (!machdep->get_cpu_reg)
+-                return FALSE;
+-        return machdep->get_cpu_reg(cpu, regno, regname, regsize, value);
++	if (!machdep->get_current_task_reg)
++		return FALSE;
++	return machdep->get_current_task_reg(regno, regname, regsize, value, sid);
+ }
+ 
+diff --git a/kernel.c b/kernel.c
+index 6dcf4146..66038119 100644
+--- a/kernel.c
++++ b/kernel.c
+@@ -3533,6 +3533,38 @@ get_lkcd_regs(struct bt_info *bt, ulong *eip, ulong *esp)
+ 	machdep->get_stack_frame(bt, eip, esp);
+ }
+ 
++void
++get_dumpfile_regs(struct bt_info *bt, ulong *eip, ulong *esp)
++{
++	bt->flags |= BT_NO_PRINT_REGS;
++
++	if (NETDUMP_DUMPFILE())
++		get_netdump_regs(bt, eip, esp);
++	else if (KDUMP_DUMPFILE())
++		get_kdump_regs(bt, eip, esp);
++	else if (DISKDUMP_DUMPFILE())
++		get_diskdump_regs(bt, eip, esp);
++	else if (KVMDUMP_DUMPFILE())
++		get_kvmdump_regs(bt, eip, esp);
++	else if (LKCD_DUMPFILE())
++		get_lkcd_regs(bt, eip, esp);
++	else if (XENDUMP_DUMPFILE())
++		get_xendump_regs(bt, eip, esp);
++	else if (SADUMP_DUMPFILE())
++		get_sadump_regs(bt, eip, esp);
++	else if (VMSS_DUMPFILE())
++		get_vmware_vmss_regs(bt, eip, esp);
++	else if (REMOTE_PAUSED()) {
++		if (!is_task_active(bt->task) || !get_remote_regs(bt, eip, esp))
++			machdep->get_stack_frame(bt, eip, esp);
++	} else
++		machdep->get_stack_frame(bt, eip, esp);
++
++	bt->flags &= ~BT_NO_PRINT_REGS;
++
++	bt->instptr = *eip;
++	bt->stkptr = *esp;
++}
+ 
+ /*
+  *  Store the head of the kernel module list for future use.

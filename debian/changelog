@@ -1,3 +1,21 @@
+crash (8.0.4-1ubuntu2+hf417806.0) noble; urgency=medium
+
+  * Enable crash to open coredumps generated on 6.14 HWE kernels (LP: #2125145)
+    - d/p/0002-X86-64-fix-for-crash-session-loading-failure.patch: Resolve an
+      issue that prevents crash session from loading on X86_64
+    - d/p/0003-Reflect-__-start-end-_init_task-kernel-symbols-rename.patch: A
+      corresponding commit to match a change in the kernel's memory map on 6.10
+      and newer
+    - d/p/0004-arm64-Add-gdb-stack-unwind-support.patch: Enables gdb to
+      correctly traverse the call stack, preventing errors where crash cannot
+      determine the starting task frame
+    - d/p/0005-Fix-mount-command-failure-on-Linux-6.8-rc1-and-later.patch:
+      Reflects a change in the kernel's tracking of mounts in an rbtree
+    - d/p/0006-Fix-the-failing-of-cmd-files-for-v6.14-rc1-kernel.patch: Reflects
+      the name change of a kernel struct member
+
+ -- Bryan Fraschetti <bryan.fraschetti@canonical.com>  Fri, 03 Oct 2025 17:26:43 -0400
+
 crash (8.0.4-1ubuntu2) noble; urgency=high
 
   * No change rebuild for 64-bit time_t and frame pointers.

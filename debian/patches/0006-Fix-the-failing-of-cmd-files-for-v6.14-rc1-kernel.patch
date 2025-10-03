@@ -1,0 +1,53 @@
+From 2795136a515446b798ebbfa257c97f0ca6ecb8ec Mon Sep 17 00:00:00 2001
+From: Tao Liu <ltao@redhat.com>
+Date: Mon, 24 Feb 2025 15:59:12 +1300
+Subject: [PATCH] Fix the failing of cmd "files" for v6.14-rc1 kernel
+
+Kernel commit <58cf9c383c5c> ("dcache: back inline names with
+a struct-wrapped array of unsigned long") renamed "unsigned char
+d_iname" into "union shortname_store d_shortname", the same change
+should be integrated into crash.
+
+Without the patch:
+
+  crash> files
+  files: invalid structure member offset: dentry_d_iname
+         FILE: filesys.c  LINE: 3243  FUNCTION: get_pathname_component()
+
+  [./crash] error trace: 55e532 => 55ea57 => 5f1f31 => 5f1eb3
+  PID: 1490     TASK: ffff8dd00c4c2900  CPU: 0    COMMAND: "bash"
+
+    5f1eb3: OFFSET_verify.part.40+51
+    5f1f31: OFFSET_verify+49
+    55ea57: get_pathname_component+69
+    55e532: get_pathname+636
+
+  files: invalid structure member offset: dentry_d_iname
+         FILE: filesys.c  LINE: 3243  FUNCTION: get_pathname_component()
+
+Signed-off-by: Tao Liu <ltao@redhat.com>
+Reported-by: Anderson Nascimento <andersonc0d3@gmail.com>
+
+Origin: upstream, https://github.com/crash-utility/crash/commit/2795136a515446b798ebbfa257c97f0ca6ecb8ec
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/crash/+bug/2125145
+---
+ filesys.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/filesys.c b/filesys.c
+index 406ebb2..8d13807 100644
+--- a/filesys.c
++++ b/filesys.c
+@@ -2051,6 +2051,9 @@ vfs_init(void)
+ 	MEMBER_OFFSET_INIT(dentry_d_covers, "dentry", "d_covers");
+ 	MEMBER_OFFSET_INIT(dentry_d_name, "dentry", "d_name");
+ 	MEMBER_OFFSET_INIT(dentry_d_iname, "dentry", "d_iname");
++	if (INVALID_MEMBER(dentry_d_iname)) {
++		MEMBER_OFFSET_INIT(dentry_d_iname, "dentry", "d_shortname");
++	}
+ 	MEMBER_OFFSET_INIT(dentry_d_sb, "dentry", "d_sb");
+ 	MEMBER_OFFSET_INIT(inode_i_mode, "inode", "i_mode");
+ 	MEMBER_OFFSET_INIT(inode_i_op, "inode", "i_op");
+-- 
+2.43.0
+

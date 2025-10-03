@@ -1,1 +1,6 @@
 0001-dont-git-clone-eppic-extension.patch
+0002-X86-64-fix-for-crash-session-loading-failure.patch
+0003-Reflect-__-start-end-_init_task-kernel-symbols-rename.patch
+0004-arm64-Add-gdb-stack-unwind-support.patch
+0005-Fix-mount-command-failure-on-Linux-6.8-rc1-and-later.patch
+0006-Fix-the-failing-of-cmd-files-for-v6.14-rc1-kernel.patch
