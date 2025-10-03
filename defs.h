@@ -976,6 +976,7 @@ struct bt_info {
 	ulong eframe_ip;
 	ulong radix;
 	ulong *cpumask;
+	bool need_free;
 };
 
 #define STACK_OFFSET_TYPE(OFF) \
@@ -1074,6 +1075,7 @@ struct machdep_table {
         void (*get_irq_affinity)(int);
         void (*show_interrupts)(int, ulong *);
 	int (*is_page_ptr)(ulong, physaddr_t *);
+	int (*get_current_task_reg)(int, const char *, int, void *, int);
 	int (*get_cpu_reg)(int, int, const char *, int, void *);
 	int (*is_cpu_prstatus_valid)(int cpu);
 };
@@ -3347,6 +3349,7 @@ typedef signed int s32;
 #define FLIPPED_VM    (0x400)
 #define HAS_PHYSVIRT_OFFSET (0x800)
 #define OVERFLOW_STACKS     (0x1000)
+#define ARM64_MTE     (0x2000)
 
 /*
  * Get kimage_voffset from /dev/crash
@@ -3485,6 +3488,7 @@ struct machine_specific {
 	ulong CONFIG_ARM64_KERNELPACMASK;
 	ulong physvirt_offset;
 	ulong struct_page_size;
+	ulong vmemmap;
 };
 
 struct arm64_stackframe {
@@ -6022,6 +6026,7 @@ int load_module_symbols_helper(char *);
 void unlink_module(struct load_module *);
 int check_specified_module_tree(char *, char *);
 int is_system_call(char *, ulong);
+void get_dumpfile_regs(struct bt_info*, ulong*, ulong*);
 void generic_dump_irq(int);
 void generic_get_irq_affinity(int);
 void generic_show_interrupts(int, ulong *);
@@ -6120,6 +6125,7 @@ ulong cpu_map_addr(const char *type);
 #define BT_REGS_NOT_FOUND (0x4000000000000ULL)
 #define BT_OVERFLOW_STACK (0x8000000000000ULL)
 #define BT_SKIP_IDLE     (0x10000000000000ULL)
+#define BT_NO_PRINT_REGS (0x20000000000000ULL)
 #define BT_SYMBOL_OFFSET   (BT_SYMBOLIC_ARGS)
 
 #define BT_REF_HEXVAL         (0x1)
@@ -7804,6 +7810,13 @@ extern int have_full_symbols(void);
 #define XEN_HYPERVISOR_ARCH 
 #endif
 
+#ifndef offsetof
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#endif
+#define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
+#define REG_SEQ(TYPE, MEMBER) \
+	(offsetof(struct TYPE, MEMBER) / FIELD_SIZEOF(struct TYPE, MEMBER))
+
 /*
  * Register numbers must be in sync with gdb/features/i386/64bit-core.c
  * to make crash_target->fetch_registers() ---> machdep->get_cpu_reg()
@@ -7852,5 +7865,53 @@ enum x86_64_regnum {
         FOP_REGNUM,
         LAST_REGNUM
 };
+
+enum arm64_regnum {
+	X0_REGNUM,
+	X1_REGNUM,
+	X2_REGNUM,
+	X3_REGNUM,
+	X4_REGNUM,
+	X5_REGNUM,
+	X6_REGNUM,
+	X7_REGNUM,
+	X8_REGNUM,
+	X9_REGNUM,
+	X10_REGNUM,
+	X11_REGNUM,
+	X12_REGNUM,
+	X13_REGNUM,
+	X14_REGNUM,
+	X15_REGNUM,
+	X16_REGNUM,
+	X17_REGNUM,
+	X18_REGNUM,
+	X19_REGNUM,
+	X20_REGNUM,
+	X21_REGNUM,
+	X22_REGNUM,
+	X23_REGNUM,
+	X24_REGNUM,
+	X25_REGNUM,
+	X26_REGNUM,
+	X27_REGNUM,
+	X28_REGNUM,
+	X29_REGNUM,
+	X30_REGNUM,
+	SP_REGNUM,
+	PC_REGNUM,
+};
+
+/*
+ * Register numbers to make crash_target->fetch_registers()
+ * ---> machdep->get_current_task_reg() work properly.
+ *
+ *  These register numbers and names are given according to output of
+ *  `rs6000_register_name`, because that is what was being used by
+ *  crash_target::fetch_registers in case of PPC64
+ */
+
+/* crash_target.c */
+extern int gdb_change_thread_context (void);
 
 #endif /* !GDB_COMMON */

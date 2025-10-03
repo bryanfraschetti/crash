@@ -101,6 +101,46 @@ struct kernel_range {
 static struct kernel_range *arm64_get_va_range(struct machine_specific *ms);
 static void arm64_get_struct_page_size(struct machine_specific *ms);
 
+/* mte tag shift bit */
+#define MTE_TAG_SHIFT		56
+/* native kernel pointers tag */
+#define KASAN_TAG_KERNEL	0xFF
+/* minimum value for random tags */
+#define KASAN_TAG_MIN		0xF0
+/* right shift the tag to MTE_TAG_SHIFT bit */
+#define mte_tag_shifted(tag)	((ulong)(tag) << MTE_TAG_SHIFT)
+/* get the top byte value of the original kvaddr */
+#define mte_tag_get(addr)	(unsigned char)((ulong)(addr) >> MTE_TAG_SHIFT)
+/* reset the top byte to get an untaggged kvaddr */
+#define mte_tag_reset(addr)	(((ulong)addr & ~mte_tag_shifted(KASAN_TAG_KERNEL)) | \
+					mte_tag_shifted(KASAN_TAG_KERNEL))
+
+struct user_regs_bitmap_struct {
+	struct arm64_pt_regs ur;
+	ulong bitmap[32];
+};
+
+static inline bool is_mte_kvaddr(ulong addr)
+{
+	/* check for ARM64_MTE enabled */
+	if (!(machdep->flags & ARM64_MTE))
+		return false;
+
+	/* check the validity of HW Tag-Based kvaddr */
+	if (mte_tag_get(addr) >= KASAN_TAG_MIN && mte_tag_get(addr) < KASAN_TAG_KERNEL)
+		return true;
+
+	return false;
+}
+
+static int arm64_is_kvaddr(ulong addr)
+{
+	if (is_mte_kvaddr(addr))
+		return (mte_tag_reset(addr) >= (ulong)(machdep->kvbase));
+
+	return (addr >= (ulong)(machdep->kvbase));
+}
+
 static void arm64_calc_kernel_start(void)
 {
 	struct machine_specific *ms = machdep->machspec;
@@ -114,6 +154,134 @@ static void arm64_calc_kernel_start(void)
 	ms->kimage_text = (sp ? sp->value : 0);
 	sp = kernel_symbol_search("_end");
 	ms->kimage_end = (sp ? sp->value : 0);
+}
+
+static int
+arm64_vmemmap_is_page_ptr(ulong addr, physaddr_t *phys)
+{
+	ulong size = SIZE(page);
+	ulong pfn, nr;
+
+	if (IS_SPARSEMEM() && (machdep->flags & VMEMMAP) &&
+	    (addr >= VMEMMAP_VADDR && addr <= VMEMMAP_END) &&
+	    !((addr - VMEMMAP_VADDR) % size)) {
+
+		pfn = (addr - machdep->machspec->vmemmap) / size;
+		nr = pfn_to_section_nr(pfn);
+		if (valid_section_nr(nr)) {
+			if (phys)
+				*phys = PTOB(pfn);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+static void arm64_get_vmemmap_page_ptr(void)
+{
+	struct machine_specific *ms = machdep->machspec;
+
+	/* If vmemmap exists, it means kernel enabled CONFIG_SPARSEMEM_VMEMMAP */
+	if (arm64_get_vmcoreinfo_ul(&ms->vmemmap, "SYMBOL(vmemmap)", NUM_HEX))
+		goto out;
+
+	/* The global symbol of vmemmap is removed since kernel commit 7bc1a0f9e1765 */
+	if (kernel_symbol_exists("vmemmap"))
+		ms->vmemmap = symbol_value("vmemmap");
+	else
+		ms->vmemmap = ms->vmemmap_vaddr - ((ms->phys_offset >> machdep->pageshift) * ms->struct_page_size);
+
+out:
+	if (ms->vmemmap)
+		machdep->is_page_ptr = arm64_vmemmap_is_page_ptr;
+}
+
+static int
+arm64_get_current_task_reg(int regno, const char *name,
+                   int size, void *value)
+{
+	struct bt_info bt_info, bt_setup;
+	struct task_context *tc;
+	struct user_regs_bitmap_struct *ur_bitmap;
+	ulong ip, sp;
+	bool ret = FALSE;
+
+	switch (regno) {
+		case X0_REGNUM ... PC_REGNUM:
+		break;
+	default:
+		return FALSE;
+	}
+
+	tc = CURRENT_CONTEXT();
+	if (!tc)
+		return FALSE;
+	BZERO(&bt_setup, sizeof(struct bt_info));
+	clone_bt_info(&bt_setup, &bt_info, tc);
+	fill_stackbuf(&bt_info);
+
+	get_dumpfile_regs(&bt_info, &sp, &ip);
+	if (bt_info.stackbuf)
+		FREEBUF(bt_info.stackbuf);
+	ur_bitmap = (struct user_regs_bitmap_struct *)bt_info.machdep;
+	if (!ur_bitmap)
+		return FALSE;
+
+	if (!bt_info.need_free) {
+		goto get_all;
+	}
+
+	switch (regno) {
+	case X0_REGNUM ... X30_REGNUM:
+		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
+		    REG_SEQ(arm64_pt_regs, regs[0]) + regno - X0_REGNUM)) {
+			FREEBUF(ur_bitmap);
+			return FALSE;
+		}
+		break;
+	case SP_REGNUM:
+		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
+		    REG_SEQ(arm64_pt_regs, sp))) {
+			FREEBUF(ur_bitmap);
+			return FALSE;
+		}
+		break;
+	case PC_REGNUM:
+		if (!NUM_IN_BITMAP(ur_bitmap->bitmap,
+		    REG_SEQ(arm64_pt_regs, pc))) {
+			FREEBUF(ur_bitmap);
+			return FALSE;
+		}
+		break;
+	}
+
+get_all:
+	switch (regno) {
+	case X0_REGNUM ... X30_REGNUM:
+		if (size != sizeof(ur_bitmap->ur.regs[regno]))
+			break;
+		memcpy(value, &ur_bitmap->ur.regs[regno], size);
+		ret = TRUE;
+		break;
+	case SP_REGNUM:
+		if (size != sizeof(ur_bitmap->ur.sp))
+			break;
+		memcpy(value, &ur_bitmap->ur.sp, size);
+		ret = TRUE;
+		break;
+	case PC_REGNUM:
+		if (size != sizeof(ur_bitmap->ur.pc))
+			break;
+		memcpy(value, &ur_bitmap->ur.pc, size);
+		ret = TRUE;
+		break;
+	}
+
+	if (bt_info.need_free) {
+		FREEBUF(ur_bitmap);
+		bt_info.need_free = FALSE;
+	}
+	return ret;
 }
 
 /*
@@ -415,6 +583,7 @@ arm64_init(int when)
 		machdep->dumpfile_init = NULL;
 		machdep->verify_line_number = NULL;
 		machdep->init_kernel_pgd = arm64_init_kernel_pgd;
+		machdep->get_current_task_reg = arm64_get_current_task_reg;
 
 		/* use machdep parameters */
 		arm64_calc_phys_offset();
@@ -539,6 +708,7 @@ arm64_init(int when)
 		 */
 		if (!LIVE()) 
 			arm64_get_crash_notes();
+		gdb_change_thread_context();
 		break;
 
 	case LOG_ONLY:
@@ -573,7 +743,7 @@ static int arm64_get_struct_page_max_shift(struct machine_specific *ms)
 }
 
 /* Return TRUE if we succeed, return FALSE on failure. */
-static int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
+int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
 {
 	char *string = pc->read_vmcoreinfo(label);
 
@@ -3725,6 +3895,7 @@ arm64_get_dumpfile_stackframe(struct bt_info *bt, struct arm64_stackframe *frame
 try_kernel:
 		frame->sp = ptregs->sp;
 		frame->fp = ptregs->regs[29];
+		bt->machdep = ptregs;
 	}
 
 	if (arm64_in_kdump_text(bt, frame) || 
@@ -3753,22 +3924,30 @@ arm64_get_stackframe(struct bt_info *bt, struct arm64_stackframe *frame)
 static void
 arm64_get_stack_frame(struct bt_info *bt, ulong *pcp, ulong *spp)
 {
-	int ret;
+	struct user_regs_bitmap_struct *ur_bitmap;
 	struct arm64_stackframe stackframe = { 0 };
 
 	if (DUMPFILE() && is_task_active(bt->task)) {
-		ret = arm64_get_dumpfile_stackframe(bt, &stackframe);
+		arm64_get_dumpfile_stackframe(bt, &stackframe);
+		bt->need_free = FALSE;
 	} else {
 		if (bt->flags & BT_SKIP_IDLE)
 			bt->flags &= ~BT_SKIP_IDLE;
 
-		ret = arm64_get_stackframe(bt, &stackframe);
-	}
+		arm64_get_stackframe(bt, &stackframe);
 
-	if (!ret)
-		error(WARNING, 
-			"cannot determine starting stack frame for task %lx\n",
-				bt->task);
+		ur_bitmap = (struct user_regs_bitmap_struct *)GETBUF(sizeof(*ur_bitmap));
+		memset(ur_bitmap, 0, sizeof(*ur_bitmap));
+		ur_bitmap->ur.pc = stackframe.pc;
+		ur_bitmap->ur.sp = stackframe.sp;
+		ur_bitmap->ur.regs[29] = stackframe.fp;
+		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, pc));
+		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, sp));
+		SET_BIT(ur_bitmap->bitmap, REG_SEQ(arm64_pt_regs, regs[0])
+						+ X29_REGNUM - X0_REGNUM);
+		bt->machdep = ur_bitmap;
+		bt->need_free = TRUE;
+	}
 
 	bt->frameptr = stackframe.fp;
 	if (pcp)
