@@ -1086,11 +1086,14 @@ int crash_get_nr_cpus(void)
         return 1;
 }
 
-int crash_get_cpu_reg (int cpu, int regno, const char *regname,
-                       int regsize, void *value)
+/* Callbacks for crash_target */
+int crash_get_current_task_reg (int regno, const char *regname,
+				int regsize, void *value, int sid);
+int crash_get_current_task_reg (int regno, const char *regname,
+				int regsize, void *value, int sid)
 {
-        if (!machdep->get_cpu_reg)
-                return FALSE;
-        return machdep->get_cpu_reg(cpu, regno, regname, regsize, value);
+	if (!machdep->get_current_task_reg)
+		return FALSE;
+	return machdep->get_current_task_reg(regno, regname, regsize, value, sid);
 }
 

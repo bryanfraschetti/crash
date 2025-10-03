@@ -976,6 +976,7 @@ struct bt_info {
 	ulong eframe_ip;
 	ulong radix;
 	ulong *cpumask;
+	bool need_free;
 };
 
 #define STACK_OFFSET_TYPE(OFF) \
@@ -1074,6 +1075,7 @@ struct machdep_table {
         void (*get_irq_affinity)(int);
         void (*show_interrupts)(int, ulong *);
 	int (*is_page_ptr)(ulong, physaddr_t *);
+	int (*get_current_task_reg)(int, const char *, int, void *, int);
 	int (*get_cpu_reg)(int, int, const char *, int, void *);
 	int (*is_cpu_prstatus_valid)(int cpu);
 };
@@ -3347,6 +3349,7 @@ typedef signed int s32;
 #define FLIPPED_VM    (0x400)
 #define HAS_PHYSVIRT_OFFSET (0x800)
 #define OVERFLOW_STACKS     (0x1000)
+#define ARM64_MTE     (0x2000)
 
 /*
  * Get kimage_voffset from /dev/crash
@@ -3485,6 +3488,7 @@ struct machine_specific {
 	ulong CONFIG_ARM64_KERNELPACMASK;
 	ulong physvirt_offset;
 	ulong struct_page_size;
+	ulong vmemmap;
 };
 
 struct arm64_stackframe {
@@ -6022,6 +6026,7 @@ int load_module_symbols_helper(char *);
 void unlink_module(struct load_module *);
 int check_specified_module_tree(char *, char *);
 int is_system_call(char *, ulong);
+void get_dumpfile_regs(struct bt_info*, ulong*, ulong*);
 void generic_dump_irq(int);
 void generic_get_irq_affinity(int);
 void generic_show_interrupts(int, ulong *);
@@ -6120,6 +6125,7 @@ ulong cpu_map_addr(const char *type);
 #define BT_REGS_NOT_FOUND (0x4000000000000ULL)
 #define BT_OVERFLOW_STACK (0x8000000000000ULL)
 #define BT_SKIP_IDLE     (0x10000000000000ULL)
+#define BT_NO_PRINT_REGS (0x20000000000000ULL)
 #define BT_SYMBOL_OFFSET   (BT_SYMBOLIC_ARGS)
 
 #define BT_REF_HEXVAL         (0x1)
@@ -7803,6 +7809,13 @@ extern int have_full_symbols(void);
 #if defined(X86) || defined(X86_64) || defined(IA64)
 #define XEN_HYPERVISOR_ARCH 
 #endif
+
+#ifndef offsetof
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#endif
+#define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
+#define REG_SEQ(TYPE, MEMBER) \
+	(offsetof(struct TYPE, MEMBER) / FIELD_SIZEOF(struct TYPE, MEMBER))
 
 /*
  * Register numbers must be in sync with gdb/features/i386/64bit-core.c

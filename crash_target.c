@@ -27,8 +27,9 @@ void crash_target_init (void);
 
 extern "C" int gdb_readmem_callback(unsigned long, void *, int, int);
 extern "C" int crash_get_nr_cpus(void);
-extern "C" int crash_get_cpu_reg (int cpu, int regno, const char *regname,
-                                  int regsize, void *val);
+extern "C" int crash_get_current_task_reg (int regno, const char *regname,
+                                  int regsize, void *val, int sid);
+extern "C" int gdb_change_thread_context (void);
 
 
 /* The crash target.  */
@@ -65,27 +66,32 @@ public:
 };
 
 /* We just get all the registers, so we don't use regno.  */
+static void supply_registers(struct regcache *regcache, int regno)
+{
+  gdb_byte regval[32];
+  struct gdbarch *arch = regcache->arch ();
+  const char *regname = gdbarch_register_name(arch, regno);
+  int regsize = register_size(arch, regno);
+
+  if (regsize > sizeof (regval))
+    error (_("fatal error: buffer size is not enough to fit register value"));
+
+  if (crash_get_current_task_reg (regno, regname, regsize, (void *)&regval, inferior_thread()->ptid.tid()))
+    regcache->raw_supply (regno, regval);
+  else
+    regcache->raw_supply (regno, NULL);
+}
+
 void
 crash_target::fetch_registers (struct regcache *regcache, int regno)
 {
-  gdb_byte regval[16];
-  int cpu = inferior_ptid.tid();
-  struct gdbarch *arch = regcache->arch ();
-
-  for (int r = 0; r < gdbarch_num_regs (arch); r++)
-    {
-      const char *regname = gdbarch_register_name(arch, r);
-      int regsize = register_size (arch, r);
-      if (regsize > sizeof (regval))
-        error (_("fatal error: buffer size is not enough to fit register value"));
-
-      if (crash_get_cpu_reg (cpu, r, regname, regsize, (void *)&regval))
-        regcache->raw_supply (r, regval);
-      else
-        regcache->raw_supply (r, NULL);
-    }
+  if (regno >= 0) {
+    supply_registers(regcache, regno);
+  } else if (regno == -1) {
+    for (int r = 0; r < gdbarch_num_regs (regcache->arch ()); r++)
+      supply_registers(regcache, r);
+  }
 }
-
 
 enum target_xfer_status
 crash_target::xfer_partial (enum target_object object, const char *annex,
@@ -132,4 +138,28 @@ crash_target_init (void)
 
   /* Now, set up the frame cache. */
   reinit_frame_cache ();
+}
+
+extern "C" int
+gdb_change_thread_context (void)
+{
+  /* 1st, switch to tid 0 if we are not */
+  if (inferior_thread()->ptid.tid()) {
+       switch_to_thread (current_inferior()->thread_list);
+  }
+  /* 2nd, delete threads whose tid is not 0 */
+  for (thread_info *tp : current_inferior()->threads_safe()) {
+       if (tp->ptid.tid() && tp->deletable()) {
+               delete_thread_silent(tp);
+               current_inferior()->highest_thread_num--;
+       }
+  }
+  /* 3rd, refresh regcache for tid 0 */
+  target_fetch_registers(get_thread_regcache(inferior_thread()), -1);
+  reinit_frame_cache();
+#if defined (X86_64) || defined (ARM64) || defined (PPC64)
+  /* 4th, invoke bt silently to refresh the additional stacks */
+  silent_call_bt();
+#endif
+  return TRUE;
 }

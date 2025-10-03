@@ -182,7 +182,7 @@ static void arm64_get_vmemmap_page_ptr(void)
 	struct machine_specific *ms = machdep->machspec;
 
 	/* If vmemmap exists, it means kernel enabled CONFIG_SPARSEMEM_VMEMMAP */
-	if (arm64_get_vmcoreinfo(&ms->vmemmap, "SYMBOL(vmemmap)", NUM_HEX))
+	if (arm64_get_vmcoreinfo_ul(&ms->vmemmap, "SYMBOL(vmemmap)", NUM_HEX))
 		goto out;
 
 	/* The global symbol of vmemmap is removed since kernel commit 7bc1a0f9e1765 */
@@ -743,7 +743,7 @@ static int arm64_get_struct_page_max_shift(struct machine_specific *ms)
 }
 
 /* Return TRUE if we succeed, return FALSE on failure. */
-static int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
+int arm64_get_vmcoreinfo_ul(unsigned long *vaddr, const char* label)
 {
 	char *string = pc->read_vmcoreinfo(label);
 
